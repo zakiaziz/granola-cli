@@ -1,10 +1,12 @@
 # CLI conventions
 
-The command-line contract this tool follows. Read before designing,
+The command-line contract of the `granola` executable. Read before designing,
 implementing, or reviewing commands.
 
 Rules have stable IDs. MUST is required; SHOULD permits a documented exception
-with its reason. Cite IDs in findings. Existing code is not precedent.
+with its reason. Cite IDs in findings. Existing code is not precedent. The
+command registry in `src/` is the command specification (`CLI-SPEC-1`); the
+README `Exceptions` section records every exception.
 
 ## Command grammar
 
@@ -42,13 +44,13 @@ with its reason. Cite IDs in findings. Existing code is not precedent.
 | export / import | Transfer content through a documented file format. |
 | batch-get / batch-create / batch-update | Operate on explicit multiple targets. |
 
-Illustrative shapes, using a generic `tool` executable:
+Examples:
 
 ~~~bash
-tool notes get NOTE_ID
-tool notes transcript get NOTE_ID
-tool articles update ARTICLE_ID --title "New title"
-tool objects get RECORD_ID --type contacts
+granola notes get NOTE_ID
+granola notes transcript get NOTE_ID
+granola webhooks update WEBHOOK_ID --enabled false
+granola api request GET /v1/notes --query page_size=5
 ~~~
 
 ## Arguments and input
@@ -125,9 +127,11 @@ Additional presentation formats such as markdown require explicit command suppor
   files, or hidden prompts instead of command-line values. MUST redact secrets
   in diagnostics, previews, and configuration inspection. Declare intentional
   secret output, such as a newly created webhook signing secret.
-- `CLI-CFG-5` MUST keep configuration per tool, honor an absolute
-  XDG_CONFIG_HOME with ~/.config as fallback, and protect credential files
-  with mode 0600 and their directories with mode 0700 on Unix.
+- `CLI-CFG-5` MUST keep configuration in a directory named after the
+  executable, `~/.config/granola`, never the repo or package name
+  (`granola-cli`). Honor an absolute XDG_CONFIG_HOME with ~/.config as
+  fallback, and protect credential files with mode 0600 and their directories
+  with mode 0700 on Unix.
 - `CLI-CFG-6` MUST describe what auth verify proves. A successful resource
   request does not prove identity or complete permission coverage.
 
@@ -169,7 +173,7 @@ Additional presentation formats such as markdown require explicit command suppor
 
 ~~~json
 {
-  "data": [{"id": "789", "title": "Reset your password"}],
+  "data": [{"id": "not_1d3tmYTlCICgjy", "title": "Weekly sync"}],
   "meta": {"next_cursor": null, "has_more": false}
 }
 ~~~
@@ -187,10 +191,10 @@ Additional presentation formats such as markdown require explicit command suppor
   presentation. Do not switch formats automatically based on terminal detection.
 
 ~~~bash
-tool notes list                            # Compact, uncolored JSON.
-tool notes list --format pretty            # Indented JSON; highlighted in a terminal.
-tool notes list --format pretty --color never
-tool notes list --format human             # Human-readable table.
+granola notes list                            # Compact, uncolored JSON.
+granola notes list --format pretty            # Indented JSON; highlighted in a terminal.
+granola notes list --format pretty --color never
+granola notes list --format human             # Human-readable table.
 ~~~
 
 ## Errors and exit codes
@@ -224,7 +228,7 @@ tool notes list --format human             # Human-readable table.
 {
   "error": {
     "code": "INVALID_ARGUMENT",
-    "message": "--page-size must be between 1 and 30; received 100.",
+    "message": "--page-size must be an integer from 1 to 30; received \"100\".",
     "hint": "Use --page-size 30.",
     "retryable": false
   }
@@ -288,70 +292,119 @@ tool notes list --format human             # Human-readable table.
   or singular/plural synonyms.
 - `CLI-COMPAT-3` MUST explicitly migrate existing -v version behavior before
   assigning -v to verbose. Do not silently reinterpret scripts.
-- `CLI-ARCH-1` SHOULD centralize parsing, output, errors, confirmation, and help
+- `CLI-ARCH-1` SHOULD share parsing, output, errors, confirmation, and help
   machinery. MUST keep provider authentication and API behavior in focused
   components. Prefer composition over a provider-aware base class.
-- `CLI-VERIFY-1` MUST verify changed contracts with appropriate tests: parsing
-  failures before requests, streams, schemas, exit codes, non-interactive
-  execution, confirmation, previews, pagination, and partial failures as
-  relevant. Never exercise live mutations merely to test CLI behavior.
+- `CLI-VERIFY-1` MUST verify changed contracts by running the built CLI:
+  parsing failures before requests, streams, schemas, exit codes,
+  non-interactive execution, confirmation, previews, pagination, and partial
+  failures as relevant, using loopback mock servers for network paths. The
+  repository carries no test suite. Never exercise live mutations merely to
+  test CLI behavior.
+
+## Distribution and installation
+
+- `CLI-DIST-1` MUST publish as `@zakiaziz/granola-cli` on the npm registry. The
+  `bin` key is `granola`.
+- `CLI-DIST-2` MUST target Node. The executable starts with
+  `#!/usr/bin/env node`, `engines.node` names the oldest supported Node LTS
+  (currently `>=22`), and code uses only Node APIs, never `Bun.*` globals. Bun
+  runs the same file unchanged.
+- `CLI-DIST-3` MUST ship a prebuilt executable. `bin` points into `dist/`,
+  `dist/` stays out of Git, `prepack` runs the build, and `files` lists only
+  `dist`, `README.md`, `LICENSE`, and `docs`. The build bundles dependencies
+  with `bun build --target=node`.
+- `CLI-DIST-4` MUST declare `license`, `repository`, and
+  `"publishConfig": {"access": "public"}`.
+- `CLI-DIST-5` MUST document installation in the README as
+  `npm install -g @zakiaziz/granola-cli` and `bun add -g @zakiaziz/granola-cli`.
+  User-facing install steps never require `git clone` or a build.
+- `CLI-DIST-6` MUST install maintainer checkouts with `bun link` from the
+  checkout, which places the command in `~/.bun/bin`. Keep one install per
+  machine: no copies in nvm, `~/.local/bin`, or other global prefixes.
+- `CLI-DIST-7` MUST keep runtime selection out of the package. Maintainer
+  machines that run only Bun invoke the linked command as `bun <command path>`
+  from a shell profile script; the published file carries no launcher logic.
+  Cron jobs and systemd units load no profile, so they call
+  `/home/<user>/.bun/bin/bun /home/<user>/.bun/bin/granola` with absolute
+  paths.
+- `CLI-DIST-8` MUST keep the repository self-contained. Code, docs, and commit
+  messages describe only this tool: no references to any employer, to other
+  tools, or to an external standards file. Because the code and docs cite rule
+  IDs, the repository ships this file.
+- `CLI-DIST-9` MUST commit as `Zaki Aziz <vexity@gmail.com>`, set in this
+  repository with `git config user.email`, so a different global Git identity
+  never applies.
+- `CLI-DIST-10` MUST keep an unpublished tool at version `0.1.0` with no
+  migration guides. Versioning and `CLI-COMPAT-1` migration mappings start with
+  the first npm publish.
+- `CLI-DIST-11` MUST NOT add CI workflows (`.github/workflows` or similar).
+
+~~~bash
+npm install -g @zakiaziz/granola-cli    # Node users.
+bun add -g @zakiaziz/granola-cli        # Bun users.
+cd granola-cli && bun run build && bun link   # Maintainers.
+~~~
 
 ## Command specification template
 
-- `CLI-SPEC-1` MUST specify each new or changed command using these fields,
-  either in its command registry or a document. Reference shared policies
-  instead of duplicating them. Record exceptions with rule IDs and reasons.
+- `CLI-SPEC-1` MUST specify each new or changed command using these fields in
+  its command registry. Reference shared policies instead of duplicating them. Record exceptions with rule IDs and reasons.
 
 ~~~yaml
-command: tool articles update
-summary: Update article metadata and localized content.
+command: granola webhooks update
+summary: Update a webhook endpoint.
 arguments:
-  - name: article-id
+  - name: WEBHOOK_ID
     type: string
     required: true
 options:
-  - name: title
+  - name: url
     type: string
-  - name: body-file
-    type: path
-    stdin: true
-  - name: locale
+  - name: scope
+    type: enum
+    repeatable: true
+  - name: event
+    type: enum
+    repeatable: true
+  - name: folder-id
     type: string
-    default: selected profile locale
+    repeatable: true
+    conflicts: [clear-folder-id]
+  - name: clear-folder-id
+    type: boolean
+  - name: enabled
+    type: enum
 validation:
   - Require at least one changed field.
   - Reject unknown options and conflicting input sources.
 authentication:
-  profile: required
-  permissions: [article-write]
+  credential: required
+  profile: optional
 effects:
   kind: remote-mutation
   confirmation: required
   dry-run: supported
-  atomic: false
+  atomic: true
   sequence:
-    - Update metadata when supplied.
-    - Update localized content when supplied.
+    - Send one PATCH request with the supplied fields.
 output:
-  json-schema: schemas/articles-update-result.json
-  partial-result-schema: schemas/articles-update-partial.json
-  human: Article ID, locale, and changed fields.
+  human: Webhook endpoint fields.
 pagination: not-applicable
 failures:
   - INVALID_ARGUMENT
   - AUTHENTICATION_FAILED
   - PERMISSION_DENIED
   - NOT_FOUND
-  - PARTIAL_FAILURE
+  - CONFIRMATION_REQUIRED
 retry:
   automatic: false
-  reason: Multiple writes can partially succeed.
+  reason: A repeated mutation may duplicate effects.
 examples:
-  - tool articles update 789 --title "Reset your password" --dry-run
-  - tool articles update 789 --title "Reset your password" --yes
+  - granola webhooks update whe_01HXYZ --enabled false --dry-run
+  - granola webhooks update whe_01HXYZ --enabled false --yes
 compatibility:
-  deprecated-aliases: [article edit]
-  removal-release: REQUIRED_BEFORE_SHIPPING_ALIAS
+  deprecated-aliases: []
 exceptions: []
 ~~~
 
@@ -362,3 +415,13 @@ exit-code assignments are deliberate choices, not universal Unix requirements.
 
 - [Command Line Interface Guidelines](https://clig.dev/)
 - [GNU argument syntax conventions](https://sourceware.org/glibc/manual/2.33/html_node/Argument-Syntax.html)
+
+## Tool notes
+
+- Transport: first-class commands send REST requests with a bearer token to the configured base URL, `https://public-api.granola.ai` by default. The registry in `src/registry.ts` holds each path, query, and body, and `src/provider.ts` holds authentication, pagination, and error mapping. Shared parsing, help, output, errors, confirmation, configuration, and HTTP machinery (`CLI-ARCH-1`) is vendored in `src/core/` and never edited in this repository.
+- Identifiers: `NOTE_ID` and `WEBHOOK_ID` are rejected when empty, `.`, `..`, or when they contain control characters, and each one is passed through `encodeURIComponent` as a single path segment. `api request` rejects `.` and `..` path segments.
+- Tri-state Granola booleans (`webhooks update --enabled`) are enum options with the placeholder `BOOLEAN` and the choices `true` and `false`. An omitted option sends nothing.
+- Cursors: Granola continuation tokens are opaque strings that the CLI passes through unchanged, so no numeric cursor or offset is parsed.
+- Partial results: a repeated cursor or an oversized page on the first page is `INVALID_RESPONSE`. On a later page, the error is `PARTIAL_FAILURE` with `details.cause` set to `INVALID_RESPONSE` and `partial` holding the completed pages. Granola mutations make one request and have no read-back step.
+- Secret handling: the API key is replaced with `[redacted]` in Granola messages, codes, and request IDs before anything prints. Base URL and `PATH` errors echo the received value with only URL credentials redacted. The `signing_secret` in a `webhooks create` response is printed on purpose, because Granola returns it only once.
+- Identity: Granola has no identity endpoint, so `auth verify` proves that the key is accepted for one read and returns no identity.

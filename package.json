@@ -1,49 +1,21 @@
 {
   "name": "@zakiaziz/granola-cli",
   "version": "0.1.0",
-  "description": "An agent-friendly command-line interface for the Granola API.",
+  "description": "Command-line interface for the Granola API.",
   "type": "module",
-  "bin": {
-    "granola": "./dist/cli.js"
-  },
-  "files": [
-    "dist",
-    "docs",
-    "README.md",
-    "LICENSE"
-  ],
+  "bin": { "granola": "./dist/cli.js" },
+  "files": ["dist", "README.md", "LICENSE", "docs"],
   "scripts": {
-    "build": "$npm_execpath node_modules/typescript/bin/tsc -p tsconfig.json",
-    "check": "$npm_execpath node_modules/typescript/bin/tsc --noEmit",
-    "test": "bun test --coverage",
-    "prepack": "bun run build"
+    "build": "bun build src/cli.ts --target=node --outfile dist/cli.js",
+    "check": "bun node_modules/typescript/bin/tsc --noEmit",
+    "prepack": "bun run build",
+    "dev": "bun --watch src/cli.ts"
   },
-  "engines": {
-    "node": ">=22"
-  },
-  "packageManager": "bun@1.3.4",
-  "keywords": [
-    "granola",
-    "meetings",
-    "transcripts",
-    "cli",
-    "api"
-  ],
+  "engines": { "node": ">=22" },
+  "packageManager": "bun@1.3.11",
+  "keywords": ["cli", "granola"],
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/zakiaziz/granola-cli.git"
-  },
-  "bugs": {
-    "url": "https://github.com/zakiaziz/granola-cli/issues"
-  },
-  "homepage": "https://github.com/zakiaziz/granola-cli#readme",
-  "publishConfig": {
-    "access": "public"
-  },
-  "devDependencies": {
-    "@types/bun": "^1.3.4",
-    "@types/node": "^24.0.0",
-    "typescript": "^5.9.0"
-  }
+  "repository": { "type": "git", "url": "git+https://github.com/zakiaziz/granola-cli.git" },
+  "publishConfig": { "access": "public" },
+  "devDependencies": { "@types/node": "^24", "typescript": "^5.8" }
 }

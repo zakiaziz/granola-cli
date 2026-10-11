@@ -1,4 +1,0 @@
-[test]
-coverage = true
-coverageReporter = "text"
-coverageThreshold = { lines = 1.0, functions = 1.0 }
