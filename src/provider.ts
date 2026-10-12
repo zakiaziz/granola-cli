@@ -49,7 +49,8 @@ function errorDetail(body: unknown): ProviderErrorDetail {
   };
 }
 
-function readPage(payload: Record<string, unknown>, collectionKey: string): PageInfo | undefined {
+function readPage(payload: unknown, collectionKey: string | undefined): PageInfo | undefined {
+  if (!isRecord(payload)) return undefined;
   const { hasMore, cursor } = payload;
   if (typeof hasMore !== "boolean") return undefined;
   if (cursor !== null && typeof cursor !== "string") return undefined;

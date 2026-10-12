@@ -10,11 +10,11 @@ import {
   type Credential,
   type FieldSet,
 } from "./credentials.js";
-import { CliError } from "./errors.js";
+import { CliError, usageError } from "./errors.js";
 import { baseUrlExample, derivingField, endpointFields, fieldConstraint, fieldExample, variableName } from "./fields.js";
 import type { EndpointField, Provider, SecretField } from "./provider.js";
 import type { GlobalOptions } from "./types.js";
-import { baseUrlConstraint, baseUrlRule, echoable, emptyVariable, invalidVariable, redactCredentials } from "./values.js";
+import { baseUrlConstraint, baseUrlRule, echoable, emptyVariable, invalidVariable, listWords, redactCredentials } from "./values.js";
 
 /** The provider definition and its configuration store, shared by every command handler. */
 export interface Tool {
@@ -211,7 +211,11 @@ export function environmentFields(provider: Provider): Record<string, string | u
   return Object.fromEntries(provider.secrets.map((field) => [field.key, environmentSecret(provider, field)]));
 }
 
-export function environmentCredential(provider: Provider): Credential | undefined {
+/**
+ * The credential the environment supplies. A variable of more than one credential set fails CONFIGURATION_ERROR, or
+ * INVALID_ARGUMENT for setup --from-env, which copies the environment as if it were options.
+ */
+export function environmentCredential(provider: Provider, copying = false): Credential | undefined {
   return credentialFrom(provider, environmentFields(provider), "environment", {
     incomplete: (set: FieldSet, missing: SecretField[]) =>
       new CliError(
@@ -219,6 +223,14 @@ export function environmentCredential(provider: Provider): Credential | undefine
         `The environment supplies an incomplete credential set: ${missingText(missing.map((field) => variableName(provider, field.key)))}.`,
         { hint: `Set ${setVariables(provider, set)} together, or unset them all.` },
       ),
+    mixed: (supplied: readonly SecretField[][]) => {
+      const found = listWords(supplied.flat().map((field) => variableName(provider, field.key)), "and");
+      const hint = `Set the variables of one credential set only: ${credentialVariables(provider)}.`;
+      if (copying) {
+        return usageError(`--from-env cannot copy fields from more than one credential set: ${found}.`, hint);
+      }
+      return new CliError("CONFIGURATION_ERROR", `The environment supplies fields from more than one credential set: ${found}.`, { hint });
+    },
   });
 }
 
@@ -230,6 +242,12 @@ function profileCredential(provider: Provider, name: string | undefined, profile
         "AUTHENTICATION_REQUIRED",
         `Profile "${name}" supplies an incomplete credential set: ${missingText(missing.map((field) => field.key))}.`,
         { hint: `Run '${provider.bin} profiles update ${name}' with the missing fields.` },
+      ),
+    mixed: (supplied: readonly SecretField[][]) =>
+      new CliError(
+        "CONFIGURATION_ERROR",
+        `Profile "${name}" supplies fields from more than one credential set: ${listWords(supplied.flat().map((field) => field.key), "and")}.`,
+        { hint: `Run '${provider.bin} profiles update ${name}' with the fields of one credential set to replace the others.` },
       ),
   });
 }

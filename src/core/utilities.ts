@@ -1,9 +1,9 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
-import { credentialSource, reportedProfile, type Tool } from "./access.js";
+import { credentialSource, reportedProfile, type Access, type Tool } from "./access.js";
 import { Client, type Call } from "./client.js";
 import { completionScript } from "./completions.js";
-import { credentialNoun, fieldSets, isPerRequest, setLabel } from "./credentials.js";
-import { usageError } from "./errors.js";
+import { credentialFor, credentialNoun, credentialVariables, fieldSets, isPerRequest, setLabel } from "./credentials.js";
+import { asCliError, CliError, usageError, type StepPartial } from "./errors.js";
 import { printRaw, printResult, printText } from "./output.js";
 import { profileCommands } from "./profiles.js";
 import type { Provider, VerifyCheck } from "./provider.js";
@@ -13,10 +13,12 @@ import {
   QUERY_OPTION,
   YES_OPTION,
   credentialOption,
+  DEFAULT_CREDENTIAL_OPTION,
   failureList,
   networkFailures,
   type CommandSpec,
   type Context,
+  type CredentialOptionName,
   type Exception,
   type GroupSpec,
   type OptionSpec,
@@ -26,6 +28,9 @@ import { SAFE_METHODS, SHELLS, type HttpMethod } from "./types.js";
 import { echoable, invalidValue, listWords, parseChoice, parseKeyValue, readJsonFile, redactCredentials } from "./values.js";
 
 const GRAPHQL_PATH = "/graphql";
+
+/** What one verify check proved, led by the credential name under the key of the credential option when there are several. */
+type CheckResult = Record<string, unknown> & { check: string; scope: string; identity?: unknown };
 
 /** Recorded in the help of every GraphQL provider's api request, so all tools say the same thing. */
 const GRAPHQL_API_EXCEPTION: Exception = {
@@ -48,6 +53,7 @@ export function utilityCommands(tool: Tool, registry: () => Registry): CommandSp
 class Utilities {
   private readonly provider: Provider;
   private readonly bin: string;
+  private readonly credentialName: CredentialOptionName;
 
   constructor(
     private readonly tool: Tool,
@@ -55,6 +61,7 @@ class Utilities {
   ) {
     this.provider = tool.provider;
     this.bin = tool.provider.bin;
+    this.credentialName = tool.provider.credentialOption ?? DEFAULT_CREDENTIAL_OPTION;
   }
 
   commands(): CommandSpec[] {
@@ -74,24 +81,29 @@ class Utilities {
     const named = checks.flatMap((check) => (check.credential === undefined ? [] : [check.credential]));
     const sets = fieldSets(this.provider).filter((set) => named.includes(set.name));
     const noun = sets.length > 0 ? listWords(sets.map(setLabel), "or") : credentialNoun(this.provider);
+    const flag = `--${this.credentialName.name}`;
+    const example = `${this.bin} auth verify${several ? ` ${flag} ${named[0] ?? ""}` : ""}`;
+    const single = `data has verified, profile, credential_source, base_url, check${identity}`;
     return {
       path: ["auth", "verify"],
       summary: `Verify the ${noun}.`,
       arguments: [],
-      options: several ? [credentialOption(named)] : [],
+      options: several ? [credentialOption(named, this.credentialName, "verify")] : [],
       kind: "network",
       effects: {
         kind: "read",
         summary: several
-          ? checks.map((check) => `--credential ${check.credential ?? ""}: ${check.effect}`).join("\n")
+          ? [
+              ...checks.map((check) => `${flag} ${check.credential ?? ""}: ${check.effect}`),
+              `Without ${flag}, runs the check of every ${this.credentialName.noun} that is available, one request each. When some checks fail and others pass, it exits 8 with PARTIAL_FAILURE and lists both.`,
+            ].join("\n")
           : (checks[0]?.effect ?? ""),
       },
-      output: `Resource envelope. data has verified, profile, credential_source, base_url, check${identity}; meta is empty.`,
-      failures: networkFailures({ identified: false, partial: this.provider.protocol === "graphql", mutation: false }),
-      examples: [
-        `${this.bin} auth verify${several ? ` --credential ${named[0] ?? ""}` : ""}`,
-        `${this.bin} auth verify${several ? ` --credential ${named[0] ?? ""}` : ""} --profile work --format human`,
-      ],
+      output: several
+        ? `Resource envelope. With ${flag}, ${single}. Without it, data has verified, profile, credential_source, base_url, and checks, one entry per check with ${this.resultKey()}, check${identity}. meta is empty.`
+        : `Resource envelope. ${single}; meta is empty.`,
+      failures: networkFailures({ identified: false, partial: several || this.provider.protocol === "graphql", mutation: false }),
+      examples: [example, `${example} --profile work --format human`],
       run: (context) => this.authVerify(context),
     };
   }
@@ -109,7 +121,7 @@ class Utilities {
       fileRequired ? { ...FILE_OPTION, required: true } : FILE_OPTION,
       YES_OPTION,
       DRY_RUN_OPTION,
-      ...(isPerRequest(this.provider) ? [credentialOption(sets.map((set) => set.name))] : []),
+      ...(isPerRequest(this.provider) ? [credentialOption(sets.map((set) => set.name), this.credentialName, "send")] : []),
     ];
     const exceptions = [...(api.graphql ? [GRAPHQL_API_EXCEPTION] : []), ...(api.exceptions ?? [])];
     return {
@@ -169,7 +181,73 @@ class Utilities {
   // Handlers
 
   private async authVerify(context: Context): Promise<void> {
-    const check = this.selectedCheck(context);
+    if (this.checks().length > 1 && !context.options.has(this.credentialName.name)) return this.verifyAvailable(context);
+    const { access, result } = await this.runCheck(context, this.selectedCheck(context));
+    const { [this.resultKey()]: _credential, ...single } = result;
+    printResult({ verified: true, ...this.identified(access), base_url: access.baseUrl, ...single });
+  }
+
+  /** Runs every check whose credential is available. A check that fails does not stop the others (CLI-ERR-4). */
+  private async verifyAvailable(context: Context): Promise<void> {
+    const access = new Client(this.tool, context).access();
+    const available = this.checks().filter((check) => credentialFor(this.provider, access.credential, check.credential) !== undefined);
+    if (available.length === 0) throw this.noCredential();
+    const passed: { check: VerifyCheck; result: CheckResult }[] = [];
+    const failed: { check: VerifyCheck; failure: CliError }[] = [];
+    for (const check of available) {
+      try {
+        passed.push({ check, result: (await this.runCheck(context, check)).result });
+      } catch (error) {
+        failed.push({ check, failure: asCliError(error) });
+      }
+    }
+    const first = failed[0];
+    if (first && passed.length === 0) throw first.failure;
+    if (first) throw this.partialVerification(passed, failed);
+    printResult({ verified: true, ...this.identified(access), base_url: access.baseUrl, checks: passed.map((item) => item.result) });
+  }
+
+  /** The key that names the credential in a check result: the credential option's name in snake case. */
+  private resultKey(): string {
+    return this.credentialName.name.replaceAll("-", "_");
+  }
+
+  private identified(access: Access): { profile: string | null; credential_source: string } {
+    return { profile: reportedProfile(access), credential_source: credentialSource(access) };
+  }
+
+  private noCredential(): CliError {
+    const sets = fieldSets(this.provider);
+    return new CliError("AUTHENTICATION_REQUIRED", `No ${this.provider.name} ${credentialNoun(this.provider, sets)} found.`, {
+      hint: `Set ${credentialVariables(this.provider, sets)}, or run '${this.bin} setup'.`,
+    });
+  }
+
+  private partialVerification(
+    passed: readonly { check: VerifyCheck; result: CheckResult }[],
+    failed: readonly { check: VerifyCheck; failure: CliError }[],
+  ): CliError {
+    const flag = `--${this.credentialName.name}`;
+    const name = (check: VerifyCheck): string => `verify ${check.credential ?? ""}`.trim();
+    const partial: StepPartial = {
+      completed: passed.map((item) => ({ step: name(item.check), result: item.result })),
+      failed: failed.map(({ check, failure }) => ({
+        step: name(check),
+        error: { code: failure.code, message: failure.message, ...(failure.extra.provider ? { provider: failure.extra.provider } : {}) },
+      })),
+      not_attempted: [],
+    };
+    const first = failed[0]?.check.credential ?? "";
+    return new CliError("PARTIAL_FAILURE", `${passed.length} of ${passed.length + failed.length} checks passed.`, {
+      hint: `Run '${this.bin} auth verify ${flag} ${first}' for the details of one failed check.`,
+      retryable: false,
+      details: { cause: failed[0]?.failure.code },
+      partial,
+    });
+  }
+
+  /** Sends one check and reports what it proved. */
+  private async runCheck(context: Context, check: VerifyCheck): Promise<{ access: Access; result: CheckResult }> {
     const client = new Client(this.tool, context, check.credential);
     const path = typeof check.path === "function" ? check.path(client.endpoint) : check.path;
     const shaped = await client.send({
@@ -181,27 +259,27 @@ class Utilities {
       ...(check.field === undefined ? {} : { field: check.field }),
     });
     check.validate?.(shaped.data);
-    const access = client.access();
     const query = new URLSearchParams(check.query).toString();
-    printResult({
-      verified: true,
-      profile: reportedProfile(access),
-      credential_source: credentialSource(access),
-      base_url: access.baseUrl,
+    const result: CheckResult = {
+      ...(check.credential === undefined ? {} : { [this.resultKey()]: check.credential }),
       check: check.label ?? `${check.method} ${path}${query === "" ? "" : `?${query}`}`,
       scope: check.identity
         ? "The credential identifies the caller. It does not prove complete permission coverage."
         : "The credential was accepted for this check only. It does not prove complete permission coverage.",
       ...(check.identity ? { identity: check.identity(shaped.data) } : {}),
-    });
+    };
+    return { access: client.access(), result };
   }
 
   private selectedCheck(context: Context): VerifyCheck {
     const checks = this.checks();
-    const wanted = context.options.string("credential");
+    const wanted = context.options.string(this.credentialName.name);
     const check = checks.length === 1 ? checks[0] : checks.find((candidate) => candidate.credential === wanted);
     if (check) return check;
-    throw usageError(`--credential must name a credential with a check; received "${wanted ?? ""}".`, `Use --credential ${checks[0]?.credential ?? "NAME"}.`);
+    throw usageError(
+      `--${this.credentialName.name} must name a ${this.credentialName.noun} with a check; received "${wanted ?? ""}".`,
+      `Use --${this.credentialName.name} ${checks[0]?.credential ?? "NAME"}.`,
+    );
   }
 
   private async apiRequest(context: Context): Promise<void> {
@@ -220,7 +298,7 @@ class Utilities {
       mutation: !safe,
       raw: true,
     };
-    const client = new Client(this.tool, context, context.options.string("credential"));
+    const client = new Client(this.tool, context, context.options.string(this.credentialName.name));
     const shaped = safe
       ? await client.send(call)
       : (

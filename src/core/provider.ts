@@ -1,8 +1,8 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
 import type { Endpoint } from "./access.js";
 import type { Client } from "./client.js";
-import type { ErrorCode } from "./errors.js";
-import type { ArgumentSpec, Context, Effects, Exception, GroupSpec, OptionSpec, PaginationSpec } from "./registry.js";
+import type { ErrorCode, ProviderInfo } from "./errors.js";
+import type { ArgumentSpec, Context, CredentialOptionName, Effects, Exception, GroupSpec, OptionSpec, PaginationSpec } from "./registry.js";
 import type { HttpMethod } from "./types.js";
 
 /**
@@ -24,9 +24,15 @@ export interface Provider {
   /**
    * How a request picks its credential set. "first-complete" (default): the first complete set of the first source
    * that supplies any field serves every request. "per-request": every set is available and each request names the
-   * one it needs, through ResourceCommand.credential, VerifyCheck.credential, and --credential on api request.
+   * one it needs, through ResourceCommand.credential, VerifyCheck.credential, and the credential option on api request.
    */
   credentialSelection?: "first-complete" | "per-request";
+  /**
+   * Names the option that selects a credential set on api request and auth verify when credentials are selected per
+   * request. Default: --credential CREDENTIAL, a noun of "credential". A provider whose sets are token types can name
+   * it --token-type. Not allowed for first-complete selection.
+   */
+  credentialOption?: CredentialOptionName;
   /** How the credential travels, completing "Sends the selected profile credentials ... as <authScheme>". */
   authScheme: string;
   /** Request headers for the selected credential set, keyed by field key. A per-request set passes only its own fields. */
@@ -57,7 +63,10 @@ export interface Provider {
   errorCodes?: Readonly<Record<string, ErrorCode>>;
   /** Default pagination style. A command can override it with PaginationSpec.style. Required when a command declares pagination without one. */
   pagination?: Pagination;
-  /** One check, or several that `auth verify --credential` chooses between. */
+  /**
+   * One check, or several. With several, `auth verify` runs every check whose credential is available, and the
+   * credential option runs one.
+   */
   verify: VerifyCheck | VerifyCheck[];
   api: RawApi;
   groups: GroupSpec[];
@@ -83,7 +92,7 @@ export interface SecretField {
 
 /** Credential fields that travel together. */
 export interface CredentialSet {
-  /** Lowercase kebab-case name, shown as a --credential choice. */
+  /** Lowercase kebab-case name, shown as a choice of the credential option. */
   name: string;
   /** Field keys. Sets partition the credential fields: each field belongs to exactly one set. */
   fields: string[];
@@ -148,19 +157,27 @@ export interface PageInfo {
   provider?: Record<string, unknown>;
 }
 
+/**
+ * A pagination style. Its members are function-typed properties, not methods, so the compiler holds an
+ * implementation to the parameter types the core passes: it narrows payload inside read instead of declaring it.
+ */
 export interface Pagination {
   /** Writes the page size and cursor into the query or the body of a collection request. */
-  apply(request: PagedRequest, page: PageRequest): void;
+  apply: (request: PagedRequest, page: PageRequest) => void;
   /**
    * Reads the continuation from a page, or returns undefined when the fields break the contract. payload is the
    * object the collection was taken from (the array itself when the collection is the response root), or the select
    * input when the command declares select. items are the page items. page is the request that produced them.
    */
-  read(payload: unknown, collectionKey: string | undefined, page: PageRequest, items: unknown[]): PageInfo | undefined;
+  read: (payload: unknown, collectionKey: string | undefined, page: PageRequest, items: unknown[]) => PageInfo | undefined;
   /** Validates a --cursor value while arguments are parsed. Returns the value or throws INVALID_ARGUMENT. */
-  checkCursor?(value: string): string;
-  /** Combines meta.provider of two pages during --all. Default: the last page wins. */
-  mergeProvider?(previous: Record<string, unknown>, next: Record<string, unknown>): Record<string, unknown>;
+  checkCursor?: (value: string) => string;
+  /**
+   * Combines meta.provider of two pages during --all. Default: a key that holds an array on both pages concatenates
+   * them and drops a later item that matches an earlier one (objects with a string or number id by type, when they
+   * have one, and id; anything else by its JSON text); any other value takes the last page's.
+   */
+  mergeProvider?: (previous: Record<string, unknown>, next: Record<string, unknown>) => Record<string, unknown>;
   /** The cursor is a counter (page number or offset): two pages with identical items fail INVALID_RESPONSE. */
   detectRepeatedPages?: boolean;
 }
@@ -208,7 +225,11 @@ export interface ResponseShape {
   collection?: boolean;
   /** Key that wraps the single resource. data is its value; a missing key is INVALID_RESPONSE. */
   resourceKey?: string;
-  /** Keys of the object holding the data that move into meta.provider. For single resources and unpaginated collections. */
+  /**
+   * Keys of the object holding the data that move into meta.provider: totals, or side-loaded arrays that sit beside the
+   * collection. A paginated read merges them across --all pages with Pagination.mergeProvider, and keys that
+   * Pagination.read also returns take its value.
+   */
   providerMeta?: readonly string[];
   /**
    * Chooses the result from the decoded body, or from the GraphQL data object. null and undefined mean no result.
@@ -218,8 +239,23 @@ export interface ResponseShape {
   /**
    * Runs after the response is validated and shaped, and returns the data to print. Throw CliError, for example
    * stepsFailure, to report a partial result. Single-response commands only: a paginated command cannot declare it.
+   * The core scrubs a CliError thrown from select, settle, or Step.validate before it prints, so helpers.scrub is
+   * for text a hook puts into data.
    */
-  settle?(result: { data: unknown; payload: unknown }, context: Context): unknown;
+  settle?(result: { data: unknown; payload: unknown }, context: Context, helpers: HookHelpers): unknown;
+}
+
+/** What a hook that reads a response may use besides the response: the exchange and the request that produced it. */
+export interface HookHelpers {
+  /**
+   * Scrubs the request's secrets from provider text, collapses whitespace and control characters, and bounds the
+   * length, the way the core cleans a provider error message. Returns "" for text that is empty after cleaning.
+   */
+  scrub(text: string): string;
+  /** HTTP status and request ID of the response, ready for stepsFailure's provider option. */
+  provider: ProviderInfo;
+  /** The request the response answers, with the body as it was sent. */
+  request: RequestSpec;
 }
 
 export interface ResourceCommandBase {

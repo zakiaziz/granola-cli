@@ -3,7 +3,8 @@ import { asCliError, CliError } from "./errors.js";
 import { invalidResponse, performRequest, type Exchange, type RequestPlan } from "./http.js";
 import type { PageInfo, Pagination } from "./provider.js";
 import type { Context } from "./registry.js";
-import { collectionOf, unwrap, type ShapeCall, type Shaped } from "./shape.js";
+import { collectionOf, retainedKeys, unwrap, type ShapeCall, type Shaped } from "./shape.js";
+import { isRecord } from "./values.js";
 
 export interface Traversal {
   pageSize: number;
@@ -83,10 +84,12 @@ async function readPage(
   const exchange = await performRequest({ ...plan, url: url.toString(), ...(target.body === undefined ? {} : { body: target.body }) });
   const unwrapped = unwrap(exchange, call, plan);
   const { items, container } = collectionOf(unwrapped, call, plan, exchange, context);
-  const info = style.read(container, call.collectionKey, request, items);
-  if (!info) {
+  const read = style.read(container, call.collectionKey, request, items);
+  if (!read) {
     throw invalidResponse(plan, `${plan.provider.name} returned invalid pagination fields for ${call.name}.`, exchange);
   }
+  const retained = retainedKeys(call.select ? unwrapped.input : container, call.providerMeta);
+  const info = retained ? { ...read, provider: { ...retained, ...read.provider } } : read;
   if (items.length > request.size) {
     throw invalidResponse(plan, `${plan.provider.name} returned ${items.length} items for ${call.name}; the page size was ${request.size}.`, exchange);
   }
@@ -140,8 +143,41 @@ function mergedProvider(
   next: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (next === undefined) return previous;
-  if (previous === undefined || !style.mergeProvider) return next;
-  return style.mergeProvider(previous, next);
+  if (previous === undefined) return next;
+  return style.mergeProvider ? style.mergeProvider(previous, next) : mergeRetained(previous, next);
+}
+
+/**
+ * The default merge of meta.provider across --all pages. A key that holds an array on both pages concatenates the
+ * arrays and drops a later item when an earlier one matches: objects with a string or number id match by type (when they
+ * have a string one) and id, anything else by its JSON text. Any other value, such as a total count, takes the last page's value.
+ */
+export function mergeRetained(previous: Record<string, unknown>, next: Record<string, unknown>): Record<string, unknown> {
+  const merged = { ...previous };
+  for (const [key, value] of Object.entries(next)) {
+    const earlier = merged[key];
+    merged[key] = Array.isArray(earlier) && Array.isArray(value) ? mergeArrays(earlier, value) : value;
+  }
+  return merged;
+}
+
+function mergeArrays(earlier: unknown[], later: unknown[]): unknown[] {
+  const merged = [...earlier];
+  const seen = new Set(earlier.map(identityOf));
+  for (const item of later) {
+    const identity = identityOf(item);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    merged.push(item);
+  }
+  return merged;
+}
+
+function identityOf(item: unknown): string {
+  if (isRecord(item) && (typeof item.id === "string" || typeof item.id === "number")) {
+    return `id:${JSON.stringify([typeof item.type === "string" ? item.type : null, item.id])}`;
+  }
+  return `json:${JSON.stringify(item) ?? "undefined"}`;
 }
 
 function outcome(page: Page, items: unknown[], provider: Record<string, unknown> | undefined): Shaped {

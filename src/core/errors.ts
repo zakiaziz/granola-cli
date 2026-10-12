@@ -51,9 +51,17 @@ export interface ProviderInfo {
   retry_after_seconds?: number;
 }
 
+/** Why one step or item failed. provider carries what the provider reported for it, such as its own numeric code. */
+export interface StepError {
+  code: ErrorCode;
+  message: string;
+  provider?: ProviderInfo;
+  details?: Record<string, unknown>;
+}
+
 export interface StepPartial {
   completed: { step: string; result: unknown }[];
-  failed: { step: string; error: { code: ErrorCode; message: string } }[];
+  failed: { step: string; error: StepError }[];
   not_attempted: { step: string }[];
 }
 
@@ -148,7 +156,10 @@ export interface StepsFailureExtra {
   /** Code of the failure that stopped the operation, kept under details.cause. */
   cause?: ErrorCode;
   outcome?: "unknown";
+  /** HTTP status, request ID, and code of the response that reported the failure. */
   provider?: ProviderInfo;
+  /** Non-secret structured context. details.cause is set from cause and wins over a key of the same name. */
+  details?: Record<string, unknown>;
   hint?: string;
 }
 
@@ -164,7 +175,7 @@ export function stepsFailure(partial: StepPartial, extra: StepsFailureExtra = {}
     retryable: false,
     ...(extra.outcome ? { outcome: extra.outcome } : {}),
     ...(extra.provider ? { provider: extra.provider } : {}),
-    ...(extra.cause ? { details: { cause: extra.cause } } : {}),
+    ...(extra.cause || extra.details ? { details: { ...extra.details, ...(extra.cause ? { cause: extra.cause } : {}) } } : {}),
     partial,
   });
 }

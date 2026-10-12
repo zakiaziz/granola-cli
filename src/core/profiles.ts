@@ -203,7 +203,7 @@ class ProfileCommands {
           name: "from-env",
           type: "boolean",
           conflicts: creating,
-          description: `Copy ${listWords(this.variables(), "and")} into the profile.`,
+          description: `Copy ${listWords(this.variables(), "and")} into the profile.${this.oneSetNote()}`,
         },
       ],
       kind: "local",
@@ -212,7 +212,7 @@ class ProfileCommands {
         summary: [
           "Creates profile NAME, then makes it the active profile. Fails when the profile exists.",
           "If activation fails, the profile stays saved and setup exits 8 with PARTIAL_FAILURE.",
-          `On a terminal without --no-input, setup prompts for a missing ${noun}. Secrets use hidden input.${this.visibleNote()}`,
+          `${this.promptText(noun)} Secrets use hidden input.${this.visibleNote()}`,
           `Profile selection: --profile, ${variableName(this.provider, "profile")}, then activeProfile in config.json. A selected or active profile that does not exist fails with CONFIGURATION_ERROR and never falls back.`,
           `Credentials: ${credentialVariables(this.provider)}, then the selected profile.`,
           ...this.endpointLines(),
@@ -224,6 +224,21 @@ class ProfileCommands {
       examples: [`${this.bin} setup work${this.exampleOptions()}`, `${this.bin} setup --from-env`],
       run: (context) => this.setup(context),
     };
+  }
+
+  /** True when a profile stores one of several credential sets and the user picks which. */
+  private choosesSet(): boolean {
+    return this.sets.length > 1 && !isPerRequest(this.provider);
+  }
+
+  private oneSetNote(): string {
+    return this.choosesSet() ? " The environment may supply the variables of one credential set only." : "";
+  }
+
+  private promptText(noun: string): string {
+    if (!this.choosesSet()) return `On a terminal without --no-input, setup prompts for a missing ${noun}.`;
+    const names = listWords(this.sets.map((set) => set.name), "or");
+    return `On a terminal without --no-input, setup asks which credential to store (${names}) when no credential option is given, then prompts for the missing fields of that credential.`;
   }
 
   private visibleNote(): string {
@@ -435,7 +450,7 @@ class ProfileCommands {
 
   /** Reads the profile values that setup --from-env copies: set credential, base URL, and endpoint variables. */
   private environmentInput(): Profile {
-    const input: Profile = { ...(environmentCredential(this.provider)?.values ?? {}) };
+    const input: Profile = { ...(environmentCredential(this.provider, true)?.values ?? {}) };
     const baseUrl = environmentBaseUrl(this.provider);
     if (baseUrl !== undefined) input.baseUrl = baseUrl;
     for (const field of this.settings) {
@@ -496,15 +511,36 @@ class ProfileCommands {
   private async completeCredential(profile: Profile, prompting: boolean): Promise<void> {
     const supplied = this.sets.filter((set) => set.fields.some((field) => profile[field.key] !== undefined));
     const perRequest = isPerRequest(this.provider);
-    const targets = supplied.length > 0 ? supplied : perRequest ? this.sets : this.sets.slice(0, 1);
+    const targets = supplied.length > 0 ? supplied : perRequest ? this.sets : [await this.chosenSet(prompting)];
     const optional = perRequest && supplied.length === 0;
-    for (const set of targets) await this.completeSet(profile, set, prompting, optional);
+    const unchosen = supplied.length === 0 && !perRequest && !prompting;
+    for (const set of targets) await this.completeSet(profile, set, prompting, optional, unchosen ? this.sets : [set]);
     if (optional && !this.sets.some((set) => set.fields.every((field) => profile[field.key] !== undefined))) {
-      throw this.credentialRequired(this.sets[0]?.fields[0], this.sets.flatMap((set) => set.fields));
+      throw this.credentialRequired(this.sets[0]?.fields[0], this.sets);
     }
   }
 
-  private async completeSet(profile: Profile, set: FieldSet, prompting: boolean, optional: boolean): Promise<void> {
+  /**
+   * The set a first-complete setup prompts for when no option supplied a field. With several sets and a terminal it
+   * asks which one, because the first set is not a default the user agreed to.
+   */
+  private async chosenSet(prompting: boolean): Promise<FieldSet> {
+    const [first] = this.sets;
+    if (!first) throw new CliError("UNEXPECTED_ERROR", `${this.provider.name} declares no credential set.`);
+    if (this.sets.length === 1 || !prompting) return first;
+    const names = this.sets.map((set) => set.name);
+    const answer = (await promptVisible(this.provider.name, `credential (${listWords(names, "or")})`)).trim();
+    if (answer === "") throw this.credentialRequired(undefined, this.sets);
+    const chosen = this.sets.find((set) => set.name === answer);
+    if (chosen) return chosen;
+    throw usageError(`The credential must be one of ${names.join(", ")}; received "${echoable(answer)}".`, `Enter ${listWords(names, "or")}.`, {
+      received: echoable(answer),
+      allowed: names.join(", "),
+    });
+  }
+
+  /** alternatives are the sets the failure offers: the set being completed, or every set when none was chosen. */
+  private async completeSet(profile: Profile, set: FieldSet, prompting: boolean, optional: boolean, alternatives: readonly FieldSet[]): Promise<void> {
     const missing = set.fields.filter((field) => profile[field.key] === undefined);
     for (const field of missing) {
       const value = prompting ? await this.promptField(field) : "";
@@ -516,7 +552,7 @@ class ProfileCommands {
         for (const item of set.fields) delete profile[item.key];
         return;
       }
-      throw this.credentialRequired(field, set.fields);
+      throw this.credentialRequired(field, alternatives);
     }
   }
 
@@ -528,13 +564,18 @@ class ProfileCommands {
     return value;
   }
 
-  private credentialRequired(field: SecretField | undefined, fields: readonly SecretField[]): CliError {
-    const options = fields.map((item) => (isSecret(item) ? `--${this.credentialOptionName(item)} PATH` : `--${this.credentialOptionName(item)} ${item.placeholder ?? upperSnake(item.key)}`));
-    const variables = fields.map((item) => variableName(this.provider, item.key));
-    const conjunction = isPerRequest(this.provider) ? "or" : "and";
-    const subject = field && !isPerRequest(this.provider) ? field.label : credentialNoun(this.provider, this.sets);
+  private credentialRequired(field: SecretField | undefined, alternatives: readonly FieldSet[]): CliError {
+    const perRequest = isPerRequest(this.provider);
+    const optionOf = (item: SecretField): string =>
+      isSecret(item) ? `--${this.credentialOptionName(item)} PATH` : `--${this.credentialOptionName(item)} ${item.placeholder ?? upperSnake(item.key)}`;
+    const variableOf = (item: SecretField): string => variableName(this.provider, item.key);
+    const group = (items: string[]): string => (items.length > 1 && alternatives.length > 1 ? `(${listWords(items, "and")})` : listWords(items, "and"));
+    const options = perRequest ? alternatives.flatMap((set) => set.fields.map(optionOf)) : alternatives.map((set) => group(set.fields.map(optionOf)));
+    const variables = perRequest ? alternatives.flatMap((set) => set.fields.map(variableOf)) : alternatives.map((set) => group(set.fields.map(variableOf)));
+    const subject = perRequest ? credentialNoun(this.provider, this.sets) : field && alternatives.length === 1 ? field.label : credentialNoun(this.provider, alternatives);
+    const join = (items: string[]): string => (perRequest ? listWords(items, "or") : items.join(" or "));
     return new CliError("AUTHENTICATION_REQUIRED", `No ${this.provider.name} ${subject} was provided.`, {
-      hint: `Pass ${listWords(options, conjunction)}, set ${listWords(variables, conjunction)} with --from-env, or run setup in a terminal.`,
+      hint: `Pass ${join(options)}, set ${join(variables)} with --from-env, or run setup in a terminal.`,
     });
   }
 

@@ -43,12 +43,14 @@ export function optionDescription(option: OptionSpec): string {
 }
 
 function argumentLabel(argument: ArgumentSpec): string {
-  return argument.optional ? `[${argument.name}]` : argument.name;
+  const name = argument.repeatable ? `${argument.name}...` : argument.name;
+  return argument.optional ? `[${name}]` : name;
 }
 
 function argumentDescription(argument: ArgumentSpec): string {
   const parts = [argument.description];
   if (argument.choices) parts.push(`Allowed: ${argument.choices.join(", ")}.`);
+  if (argument.repeatable) parts.push("Repeatable.");
   if (!argument.optional) parts.push("Required.");
   return parts.join(" ");
 }
@@ -116,9 +118,10 @@ function commandHelp(bin: string, spec: CommandSpec): string {
 
 function paginationText(spec: CommandSpec): string | undefined {
   if (!spec.pagination) return spec.unpaginated;
-  const { max, ordering, window } = spec.pagination;
+  const { max, maxSource, ordering, window } = spec.pagination;
+  const limit = maxSource === "tool" ? `Page size limit: ${max}, set by this tool because the provider documents none.` : `Provider limit: ${max} per page.`;
   return [
-    `One page by default. ${ordering} Provider limit: ${max} per page.`,
+    `One page by default. ${ordering} ${limit}`,
     "--all follows every cursor. --max-items stops on a page boundary, and meta.next_cursor resumes the read.",
     ...(window === undefined
       ? []

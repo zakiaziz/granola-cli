@@ -1,17 +1,22 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
 import { readGraphql } from "./graphql.js";
-import { decodeJson, invalidResponse, type Exchange, type RequestPlan } from "./http.js";
-import type { ResponseShape } from "./provider.js";
+import type { ProviderInfo } from "./errors.js";
+import { cleanProviderText, decodeJson, guardHook, invalidResponse, type Exchange, type RequestPlan } from "./http.js";
+import type { HookHelpers, RequestSpec, ResponseShape } from "./provider.js";
 import type { Context } from "./registry.js";
 import { isRecord } from "./values.js";
 
-/** A response shape with the facts the core needs to name and classify failures. */
-export interface ShapeCall extends ResponseShape {
+/** A request with how to read its response, and the facts the core needs to name and classify failures. */
+export interface ShapeCall extends ResponseShape, RequestSpec {
   /** Command name for messages. */
   name: string;
-  /** GraphQL root field the request reads. */
-  field?: string | undefined;
   mutation: boolean;
+}
+
+/** Builds what a hook that reads a response may use (HookHelpers). */
+export function hookHelpers(request: RequestSpec, plan: RequestPlan, exchange: Exchange): HookHelpers {
+  const provider: ProviderInfo = { status: exchange.status, ...(exchange.requestId ? { request_id: exchange.requestId } : {}) };
+  return { scrub: (text) => cleanProviderText(text, plan) ?? "", provider, request };
 }
 
 export interface Shaped {
@@ -41,9 +46,10 @@ export function isCollection(call: ResponseShape): boolean {
   return call.collectionKey !== undefined || call.collection === true;
 }
 
-function choose(unwrapped: Unwrapped, call: ShapeCall, context: Context): unknown {
-  if (!call.select) return unwrapped.root;
-  return call.select(unwrapped.input, context) ?? null;
+function choose(unwrapped: Unwrapped, call: ShapeCall, plan: RequestPlan, context: Context): unknown {
+  const { select } = call;
+  if (!select) return unwrapped.root;
+  return guardHook(plan, () => select(unwrapped.input, context)) ?? null;
 }
 
 /** Takes the collection out of one response. container is what Pagination.read receives as its payload. */
@@ -54,7 +60,7 @@ export function collectionOf(
   exchange: Exchange,
   context: Context,
 ): { items: unknown[]; container: unknown } {
-  const base = choose(unwrapped, call, context);
+  const base = choose(unwrapped, call, plan, context);
   const key = call.collectionKey;
   if (key !== undefined) {
     const items = isRecord(base) && Object.hasOwn(base, key) ? base[key] : undefined;
@@ -71,7 +77,10 @@ export function shapeResponse(unwrapped: Unwrapped, call: ShapeCall, plan: Reque
   const { value, container } = collection
     ? valueOfCollection(unwrapped, call, plan, exchange, context)
     : valueOfResource(unwrapped, call, plan, exchange, context);
-  const data = call.settle ? (call.settle({ data: value, payload: unwrapped.body }, context) ?? null) : value;
+  const { settle } = call;
+  const data = settle
+    ? (guardHook(plan, () => settle({ data: value, payload: unwrapped.body }, context, hookHelpers(call, plan, exchange))) ?? null)
+    : value;
   return { data, meta: providerMeta(call.select ? unwrapped.input : container, call.providerMeta) };
 }
 
@@ -93,7 +102,7 @@ function valueOfResource(
   exchange: Exchange,
   context: Context,
 ): { value: unknown; container: unknown } {
-  const base = choose(unwrapped, call, context);
+  const base = choose(unwrapped, call, plan, context);
   const key = call.resourceKey;
   let value = base;
   if (key !== undefined) {
@@ -109,7 +118,13 @@ function valueOfResource(
 }
 
 function providerMeta(container: unknown, keys: readonly string[] | undefined): Record<string, unknown> {
-  if (!keys || !isRecord(container)) return {};
+  const found = retainedKeys(container, keys);
+  return found ? { provider: found } : {};
+}
+
+/** The named keys of the object that hold data for meta.provider, or undefined when the response holds none of them. */
+export function retainedKeys(container: unknown, keys: readonly string[] | undefined): Record<string, unknown> | undefined {
+  if (!keys || !isRecord(container)) return undefined;
   const found = Object.fromEntries(keys.filter((key) => Object.hasOwn(container, key)).map((key) => [key, container[key]]));
-  return Object.keys(found).length > 0 ? { provider: found } : {};
+  return Object.keys(found).length > 0 ? found : undefined;
 }

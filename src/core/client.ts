@@ -11,12 +11,12 @@ import {
 import { credentialFor, credentialVariables, setsFor } from "./credentials.js";
 import { confirmMutation, type ShownChange } from "./confirm.js";
 import { asCliError, CliError, stepsFailure, type ErrorCode, type StepPartial } from "./errors.js";
-import { buildPlan, decodeRaw, displayUrl, performRequest, scrubDeep, type RequestPlan } from "./http.js";
+import { buildPlan, decodeRaw, displayUrl, guardHook, performRequest, scrubDeep, type Exchange, type RequestPlan } from "./http.js";
 import { printResult } from "./output.js";
 import { traverse } from "./pagination.js";
-import type { RequestSpec, ResponseShape } from "./provider.js";
+import type { HookHelpers, RequestSpec, ResponseShape } from "./provider.js";
 import type { Context } from "./registry.js";
-import { shapeResponse, unwrap, type ShapeCall, type Shaped } from "./shape.js";
+import { hookHelpers, shapeResponse, unwrap, type ShapeCall, type Shaped } from "./shape.js";
 import type { HttpMethod } from "./types.js";
 import { redact, REDACTED } from "./values.js";
 
@@ -41,8 +41,21 @@ export interface Change {
 export interface Step {
   name: string;
   call: Call;
-  /** Runs on the shaped response. Throw CliError, for example INVALID_RESPONSE, when the response is not what the step expects. */
-  validate?(data: unknown): void;
+  /**
+   * Runs on the shaped response. Throw CliError, for example INVALID_RESPONSE, when the response is not what the step
+   * expects. The core scrubs the error before it prints.
+   */
+  validate?(data: unknown, helpers: HookHelpers): void;
+}
+
+/** How Client.poll reads a response again until the work it waits for is done. */
+export interface PollOptions {
+  /** Time to wait before every read, the first included, so the first read follows the action that started the work. */
+  intervalMs: number;
+  /** Overall deadline for the whole poll. The --timeout of each read still applies, capped to the time left. */
+  timeoutMs: number;
+  /** Returns true when the shaped response shows the work is done. Throw CliError, for example INVALID_RESPONSE, for a response it cannot read; the core scrubs it. */
+  until(data: unknown): boolean;
 }
 
 /** The ordered requests of one mutation, and what a preview and the confirmation prompt show about them. */
@@ -83,6 +96,30 @@ export class Client {
   async send(call: Call): Promise<Shaped> {
     if (call.mutation) throw new CliError("UNEXPECTED_ERROR", `${this.name()} sends a mutation through send; use mutate.`);
     return this.execute(this.plan(call, true), call);
+  }
+
+  /**
+   * Reads one response again every intervalMs until `until` accepts it, or timeoutMs passes. Returns the accepted
+   * response, or undefined at the deadline, including when the deadline cuts a read or its retry wait short. The deadline bounds the
+   * retries of every read, so the poll never runs past it by a request timeout. Any other failure throws.
+   */
+  async poll(call: Call, options: PollOptions): Promise<Shaped | undefined> {
+    if (call.mutation) throw new CliError("UNEXPECTED_ERROR", `${this.name()} polls with a mutation; a poll sends reads only.`);
+    const plan = this.plan(call, true);
+    const deadline = Date.now() + options.timeoutMs;
+    while (true) {
+      await sleep(Math.max(0, Math.min(options.intervalMs, deadline - Date.now())));
+      if (Date.now() >= deadline) return undefined;
+      try {
+        const { shaped } = await this.exchange(plan, call, deadline);
+        if (guardHook(plan, () => options.until(shaped.data))) return shaped;
+      } catch (error) {
+        const failure = asCliError(error);
+        const retryable = failure.code === "TRANSIENT_FAILURE" || failure.code === "RATE_LIMITED";
+        if (retryable && Date.now() >= deadline) return undefined;
+        throw failure;
+      }
+    }
   }
 
   /** Reads a collection with the --page-size, --cursor, --all, and --max-items options of the command. */
@@ -139,8 +176,10 @@ export class Client {
     const results: Shaped[] = [];
     for (const [index, step] of steps.entries()) {
       try {
-        const shaped = await this.execute(plans[index] as RequestPlan, step.call);
-        step.validate?.(shaped.data);
+        const plan = plans[index] as RequestPlan;
+        const { shaped, exchange } = await this.exchange(plan, step.call);
+        const { validate } = step;
+        if (validate) guardHook(plan, () => validate(shaped.data, hookHelpers(step.call, plan, exchange)));
         results.push(shaped);
       } catch (error) {
         if (index === 0) throw error;
@@ -178,10 +217,15 @@ export class Client {
   }
 
   private async execute(plan: RequestPlan, call: Call): Promise<Shaped> {
-    const exchange = await performRequest(plan);
-    if (call.raw) return { data: decodeRaw(exchange, call.mutation, plan), meta: {} };
+    return (await this.exchange(plan, call)).shaped;
+  }
+
+  /** Sends the request and shapes the response. deadline (epoch milliseconds) bounds every attempt. */
+  private async exchange(plan: RequestPlan, call: Call, deadline?: number): Promise<{ shaped: Shaped; exchange: Exchange }> {
+    const exchange = await performRequest(plan, deadline);
+    if (call.raw) return { shaped: { data: decodeRaw(exchange, call.mutation, plan), meta: {} }, exchange };
     const shapeCall = this.shapeCall(call);
-    return shapeResponse(unwrap(exchange, shapeCall, plan), shapeCall, plan, exchange, this.context);
+    return { shaped: shapeResponse(unwrap(exchange, shapeCall, plan), shapeCall, plan, exchange, this.context), exchange };
   }
 
   private preview(plan: MutationPlan, previews: RequestPlan[], access: Access): void {
@@ -208,6 +252,8 @@ export class Client {
   }
 }
 
+const sleep = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 /** Hides every header the provider's authorize() produced, whatever its name. */
 function hiddenHeaders(plan: RequestPlan): Record<string, string> {
   return Object.fromEntries(plan.credentialHeaders.map((name) => [name, REDACTED]));
@@ -225,6 +271,7 @@ function partialFailure(steps: Step[], results: Shaped[], index: number, failure
   const nested = inner !== undefined && "completed" in inner ? inner : undefined;
   const earlier = results.map((result, position) => ({ step: (steps[position] as Step).name, result: result.data }));
   const later = steps.slice(index + 1).map((step) => ({ step: step.name }));
+  const { cause: innerCause, ...innerDetails } = failure.extra.details ?? {};
   const partial: StepPartial = nested
     ? {
         completed: [...earlier, ...nested.completed],
@@ -233,12 +280,23 @@ function partialFailure(steps: Step[], results: Shaped[], index: number, failure
       }
     : {
         completed: earlier,
-        failed: [{ step: failed.name, error: { code: failure.code, message: failure.message } }],
+        failed: [
+          {
+            step: failed.name,
+            error: {
+              code: failure.code,
+              message: failure.message,
+              ...(failure.extra.provider ? { provider: failure.extra.provider } : {}),
+              ...(failure.extra.details ? { details: failure.extra.details } : {}),
+            },
+          },
+        ],
         not_attempted: later,
       };
-  const cause = nested ? ((failure.extra.details?.cause as ErrorCode | undefined) ?? failure.code) : failure.code;
+  const cause = nested ? ((innerCause as ErrorCode | undefined) ?? failure.code) : failure.code;
   return stepsFailure(partial, {
     cause,
+    ...(nested && Object.keys(innerDetails).length > 0 ? { details: innerDetails } : {}),
     ...(failure.extra.outcome ? { outcome: failure.extra.outcome } : {}),
     ...(failure.extra.provider ? { provider: failure.extra.provider } : {}),
   });

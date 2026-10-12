@@ -1,7 +1,7 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
 import { reportedProfile, type Access } from "./access.js";
 import { credentialNoun, credentialVariables, isSecret, type Credential } from "./credentials.js";
-import { asCliError, CliError, failureCode, httpFailure, waitHint, type ErrorCode, type ProviderInfo } from "./errors.js";
+import { asCliError, CliError, failureCode, httpFailure, waitHint, type ErrorCode, type PagePartial, type ProviderInfo, type StepError, type StepPartial } from "./errors.js";
 import { printDiagnostic } from "./output.js";
 import type { Provider } from "./provider.js";
 import type { HttpMethod } from "./types.js";
@@ -109,26 +109,43 @@ function scrubbedValues(
   };
 }
 
-export async function performRequest(plan: RequestPlan): Promise<Exchange> {
+/**
+ * Sends a request with the retries its safety allows. With a deadline (epoch milliseconds) no attempt outlasts it:
+ * each attempt's timeout is capped to the time left, and a retry that would start after it is not made, so the last
+ * failure is thrown instead.
+ */
+export async function performRequest(plan: RequestPlan, deadline?: number): Promise<Exchange> {
   const attempts = plan.safe ? MAX_ATTEMPTS : 1;
   for (let attempt = 1; ; attempt += 1) {
+    const left = deadline === undefined ? Number.POSITIVE_INFINITY : deadline - Date.now();
+    if (left <= 0) throw deadlinePassed(plan);
+    const timeoutMs = Math.min(plan.timeoutMs, left);
     printDiagnostic("request", {
       method: plan.method,
       url: displayUrl(plan),
       attempt,
-      timeout_ms: plan.timeoutMs,
+      timeout_ms: timeoutMs,
       profile: plan.profile,
     });
     try {
-      return await attemptOnce(plan);
+      return await attemptOnce({ ...plan, timeoutMs });
     } catch (error) {
       const failure = limitRetryAfter(asCliError(error));
       const delay = retryDelay(failure, attempt, attempts);
-      if (delay === undefined) throw failure;
+      if (delay === undefined || (deadline !== undefined && Date.now() + delay >= deadline)) throw failure;
       printDiagnostic("retry", { attempt, delay_ms: delay, reason: failure.code });
       await new Promise((resolve) => setTimeout(resolve, delay));
+      if (deadline !== undefined && Date.now() >= deadline) throw failure;
     }
   }
+}
+
+/** The deadline passed before an attempt could start, so nothing was sent. */
+function deadlinePassed(plan: RequestPlan): CliError {
+  return new CliError("TRANSIENT_FAILURE", `${plan.provider.name} request was not sent because its deadline had passed.`, {
+    hint: "Increase --timeout or retry.",
+    retryable: plan.safe,
+  });
 }
 
 function limitRetryAfter(failure: CliError): CliError {
@@ -232,6 +249,45 @@ export function cleanProviderText(value: string | undefined, plan: RequestPlan, 
     .trim();
   if (text === "") return undefined;
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+/**
+ * Scrubs a failure that provider code in a hook threw (select, settle, Step.validate): every string it carries, the
+ * provider info, the details, and all steps and items, whose failure messages are also collapsed and bounded like a
+ * provider error message.
+ */
+export function scrubFailure(failure: CliError, plan: RequestPlan): CliError {
+  const { hint, details, provider, partial } = failure.extra;
+  return new CliError(failure.code, cleanProviderText(failure.message, plan) ?? failure.message, {
+    ...failure.extra,
+    ...(hint === undefined ? {} : { hint: scrubSecrets(hint, plan) }),
+    ...(details === undefined ? {} : { details: scrubDeep(details, plan) as Record<string, unknown> }),
+    ...(provider === undefined ? {} : { provider: scrubDeep(provider, plan) as ProviderInfo }),
+    ...(partial === undefined ? {} : { partial: scrubbedPartial(partial, plan) }),
+  });
+}
+
+function scrubbedPartial(partial: StepPartial | PagePartial, plan: RequestPlan): StepPartial | PagePartial {
+  if (!("failed" in partial)) return scrubDeep(partial, plan) as PagePartial;
+  // A failure message is cleaned from its original text, so a secret is never matched inside an earlier replacement.
+  const failed = partial.failed.map(({ step, error }) => ({
+    step: scrubSecrets(step, plan),
+    error: { ...(scrubDeep({ ...error, message: "" }, plan) as StepError), message: cleanProviderText(error.message, plan) ?? "" },
+  }));
+  return {
+    completed: scrubDeep(partial.completed, plan) as StepPartial["completed"],
+    failed,
+    not_attempted: scrubDeep(partial.not_attempted, plan) as StepPartial["not_attempted"],
+  };
+}
+
+/** Runs provider code that shapes a response. A CliError it throws is scrubbed before it can print. */
+export function guardHook<T>(plan: RequestPlan, hook: () => T): T {
+  try {
+    return hook();
+  } catch (error) {
+    throw error instanceof CliError ? scrubFailure(error, plan) : error;
+  }
 }
 
 function unsupportedResponse(message: string, exchange: Exchange, plan: RequestPlan): CliError {

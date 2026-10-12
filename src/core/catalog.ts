@@ -7,7 +7,7 @@ import { derivingField, endpointFields, fieldConstraint } from "./fields.js";
 import type { Provider, ResourceCommand } from "./provider.js";
 import { SAFE_METHODS } from "./types.js";
 import { baseUrlConstraint } from "./values.js";
-import { Registry } from "./registry.js";
+import { GLOBAL_OPTIONS, Registry, type ArgumentSpec } from "./registry.js";
 import { localCommand, resourceCommand } from "./resources.js";
 import { UTILITY_GROUP_SPECS, utilityCommands } from "./utilities.js";
 
@@ -39,6 +39,7 @@ function validateProvider(provider: Provider): void {
     const path = command.path.join(" ");
     if (paths.has(path)) fail(`${path} is declared twice.`);
     paths.add(path);
+    validateArguments(path, command.arguments);
   }
   for (const command of provider.commands) validateCommand(provider, command);
 }
@@ -81,6 +82,22 @@ function validateCredentials(provider: Provider): void {
     fail("Credential set names are lowercase kebab-case.");
   }
   if (sets.some((set) => set.fields.length === 0)) fail("A credential set has no fields.");
+  validateCredentialOption(provider);
+}
+
+/** Keys of an auth verify result. The credential option's name, in snake case, leads each check of a verification of several. */
+const VERIFY_KEYS = ["verified", "profile", "credential_source", "base_url", "checks", "check", "scope", "identity"];
+const TAKEN_OPTIONS = ["query", "file", "yes", "dry-run", ...GLOBAL_OPTIONS.map((option) => option.name)];
+
+function validateCredentialOption(provider: Provider): void {
+  const option = provider.credentialOption;
+  if (!option) return;
+  if (!isPerRequest(provider)) fail("credentialOption needs per-request credential selection.");
+  if (!/^[a-z][a-z0-9-]*$/.test(option.name)) fail(`credentialOption name "${option.name}" must be lowercase kebab-case.`);
+  if (TAKEN_OPTIONS.includes(option.name)) fail(`credentialOption name "${option.name}" collides with another option.`);
+  if (VERIFY_KEYS.includes(option.name.replaceAll("-", "_"))) fail(`credentialOption name "${option.name}" collides with a key of the auth verify result.`);
+  if (!/^[A-Z][A-Z0-9_]*$/.test(option.placeholder)) fail(`credentialOption placeholder "${option.placeholder}" must be upper snake case.`);
+  if (!/^[a-z][a-z ]*$/.test(option.noun)) fail(`credentialOption noun "${option.noun}" must be lowercase words.`);
 }
 
 function validateApi(provider: Provider): void {
@@ -99,6 +116,14 @@ function validateApi(provider: Provider): void {
   } else if (checks.length > 1) {
     fail("Several verify checks need per-request credential selection.");
   }
+}
+
+function validateArguments(path: string, args: readonly ArgumentSpec[]): void {
+  args.forEach((argument, index) => {
+    if (!argument.repeatable) return;
+    if (index !== args.length - 1) fail(`${path} repeats argument ${argument.name}, which is not the last argument.`);
+    if (argument.choices || argument.completion) fail(`${path} repeats argument ${argument.name} with choices or completion, which completions cannot offer for every value.`);
+  });
 }
 
 function validateCommand(provider: Provider, command: ResourceCommand): void {

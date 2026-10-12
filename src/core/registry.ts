@@ -29,6 +29,11 @@ export interface ArgumentSpec {
   name: string;
   description: string;
   optional?: boolean;
+  /**
+   * Takes one or more values, or zero or more when optional, and every value passes check. Only the last argument can
+   * repeat, and a repeating argument declares no choices or completion. Context.args holds every value in order.
+   */
+  repeatable?: boolean;
   choices?: string[];
   completion?: "profiles";
   /** Validates the value during parsing, after the argument count and before option values (STYLE-ARGS-10). */
@@ -92,9 +97,15 @@ export interface Exception {
 }
 
 export interface PaginationSpec {
+  /** Largest page size the command accepts. */
   max: number;
   default: number;
   ordering: string;
+  /**
+   * Who sets max. "provider" (default): the provider documents the limit and help says so. "tool": the provider
+   * documents no limit and this tool caps the page size itself, which help says instead.
+   */
+  maxSource?: "provider" | "tool";
   /** The style this command pages with. Default: the provider's pagination. */
   style?: Pagination;
   /**
@@ -195,14 +206,29 @@ export const FILE_OPTION: OptionSpec = {
   description: "Read the complete JSON input from PATH. - reads stdin.",
 };
 
-export function credentialOption(names: readonly string[]): OptionSpec {
+/** The default option that names a credential set when the provider selects credentials per request. */
+export const DEFAULT_CREDENTIAL_OPTION: CredentialOptionName = { name: "credential", placeholder: "CREDENTIAL", noun: "credential" };
+
+export interface CredentialOptionName {
+  /** Lowercase kebab-case option name, without the dashes. */
+  name: string;
+  /** Option value placeholder in upper snake case. */
+  placeholder: string;
+  /** Lowercase noun for what the option selects, completing "<Noun> to send." in help. */
+  noun: string;
+}
+
+/** The option that names a credential set. required: api request needs one set, auth verify can run every available set. */
+export function credentialOption(names: readonly string[], definition: CredentialOptionName, use: "send" | "verify"): OptionSpec {
+  const noun = `${definition.noun.charAt(0).toUpperCase()}${definition.noun.slice(1)}`;
   return {
-    name: "credential",
-    placeholder: "CREDENTIAL",
+    name: definition.name,
+    placeholder: definition.placeholder,
     type: "enum",
     choices: [...names],
-    required: true,
-    description: "Credential to send.",
+    ...(use === "send" ? { required: true } : {}),
+    description:
+      use === "send" ? `${noun} to send.` : `${noun} to verify. Without it, every ${definition.noun} that is available is verified.`,
   };
 }
 

@@ -54,9 +54,11 @@ export function credentialVariables(provider: Provider, sets: readonly FieldSet[
   return sets.map((set) => setVariables(provider, set)).join(", or ");
 }
 
-/** How a source reports an incomplete set. */
+/** How a source reports an incomplete set, and fields that come from more than one set. */
 export interface SourceText {
   incomplete(set: FieldSet, missing: SecretField[]): CliError;
+  /** supplied lists the supplied fields of each set that has any, in set order. */
+  mixed(supplied: readonly SecretField[][]): CliError;
 }
 
 function isSupplied(supplied: Readonly<Record<string, string | undefined>>, field: SecretField): boolean {
@@ -65,8 +67,9 @@ function isSupplied(supplied: Readonly<Record<string, string | undefined>>, fiel
 
 /**
  * Picks the credential a source supplies (STYLE-CFG-2). A source that supplies any field is the source. First-complete
- * providers take the first complete set, ignore other sets, and fail when no set is complete. Per-request providers
- * keep every supplied field, and the request that names a set checks it.
+ * providers take the one complete set the source supplies, and fail when the source supplies fields of more than one
+ * set (the source says which) or when its set is incomplete. Per-request providers keep every supplied field, and the
+ * request that names a set checks it.
  */
 export function credentialFrom(
   provider: Provider,
@@ -77,11 +80,13 @@ export function credentialFrom(
   const sets = fieldSets(provider);
   if (!sets.some((set) => set.fields.some((field) => isSupplied(supplied, field)))) return undefined;
   if (isPerRequest(provider)) return { values: definedValues(provider.secrets, supplied), source };
-  const complete = sets.find((set) => set.fields.every((field) => isSupplied(supplied, field)));
-  if (complete) return { values: definedValues(complete.fields, supplied), source };
-  const partial = sets.find((set) => set.fields.some((field) => isSupplied(supplied, field)));
-  if (!partial) return undefined;
-  throw text.incomplete(partial, partial.fields.filter((field) => !isSupplied(supplied, field)));
+  const supplying = sets.filter((set) => set.fields.some((field) => isSupplied(supplied, field)));
+  if (supplying.length > 1) throw text.mixed(supplying.map((set) => set.fields.filter((field) => isSupplied(supplied, field))));
+  const set = supplying[0];
+  if (!set) return undefined;
+  const missing = set.fields.filter((field) => !isSupplied(supplied, field));
+  if (missing.length > 0) throw text.incomplete(set, missing);
+  return { values: definedValues(set.fields, supplied), source };
 }
 
 function definedValues(fields: readonly SecretField[], supplied: Readonly<Record<string, string | undefined>>): Record<string, string> {

@@ -5,6 +5,7 @@ import { usageLine } from "./help.js";
 import {
   acceptedGlobals,
   Options,
+  type ArgumentSpec,
   type CommandSpec,
   type Context,
   type OptionSpec,
@@ -229,15 +230,22 @@ class Parser {
     if (positionals.length < required.length) {
       throw usageError(`Missing argument ${required[positionals.length]?.name ?? ""} for "${label}".`, hint);
     }
-    if (positionals.length > spec.arguments.length) {
+    const repeating = spec.arguments.at(-1)?.repeatable === true;
+    if (!repeating && positionals.length > spec.arguments.length) {
       throw usageError(`Unexpected argument "${positionals[spec.arguments.length] ?? ""}" for "${label}".`, hint);
     }
-    const empty = spec.arguments.find((_argument, index) => positionals[index] === "");
-    if (empty) throw emptyValue(empty.name);
-    spec.arguments.forEach((argument, index) => {
-      const value = positionals[index];
-      if (value !== undefined && argument.check) argument.check(value);
+    positionals.forEach((value, index) => {
+      const argument = this.argumentAt(spec, index);
+      if (value === "" && argument) throw emptyValue(argument.name);
     });
+    positionals.forEach((value, index) => this.argumentAt(spec, index)?.check?.(value));
+  }
+
+  /** The argument a positional fills: the one at its index, or the last when that one repeats. */
+  private argumentAt(spec: CommandSpec, index: number): ArgumentSpec | undefined {
+    const last = spec.arguments.at(-1);
+    if (index >= spec.arguments.length) return last?.repeatable ? last : undefined;
+    return spec.arguments[index];
   }
 
   private buildContext(spec: CommandSpec, args: string[], raw: Map<string, RawOption>): Context {
