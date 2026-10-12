@@ -6,23 +6,18 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { CliError } from "./errors.js";
 import { endpointFields, fieldConstraint } from "./fields.js";
 import type { EndpointField, Provider } from "./provider.js";
-import { baseUrlConstraint, echoable, invalidValue, invalidVariable, isRecord, redactCredentials } from "./values.js";
+import { baseUrlConstraint, echoable, invalidValue, isRecord, redactCredentials } from "./values.js";
 
 /** Stored credential fields, baseUrl, and endpoint fields, by key. */
 export type Profile = Record<string, string>;
 
-/** config.json: activeProfile, baseUrl, and endpoint fields, by key. */
-export type AppConfig = Record<string, string>;
-
-/** Every config key of a provider, in output order: activeProfile, baseUrl, then its endpoint fields. */
-export function configKeys(provider: Provider): string[] {
-  return ["activeProfile", "baseUrl", ...endpointFields(provider).map((field) => field.key)];
+/** config.json: the name of the active profile. Credentials and endpoint settings live only in profiles. */
+export interface AppConfig {
+  activeProfile?: string;
 }
 
-/** Keys changed through config set and unset: every config key except activeProfile. */
-export function writableConfigKeys(provider: Provider): string[] {
-  return configKeys(provider).filter((key) => key !== "activeProfile");
-}
+/** Every config key. */
+export const CONFIG_KEYS: readonly string[] = ["activeProfile"];
 
 export const PROFILE_NAME_PATTERN = "^[A-Za-z0-9._-]+$";
 const PROFILE_NAME_CONSTRAINT = `match ${PROFILE_NAME_PATTERN} and not be "." or ".."`;
@@ -38,18 +33,11 @@ export function checkProfileName(subject: string, name: string): string {
   throw invalidValue(subject, PROFILE_NAME_CONSTRAINT, name, PROFILE_NAME_HINT, PROFILE_NAME_PATTERN);
 }
 
-export function checkProfileVariable(variable: string, name: string): string {
-  if (isValidProfileName(name)) return name;
-  throw invalidVariable(variable, PROFILE_NAME_CONSTRAINT, name, PROFILE_NAME_HINT, PROFILE_NAME_PATTERN);
-}
-
 export class ConfigStore {
   private readonly profileKeys: readonly string[];
-  private readonly configKeys: readonly string[];
 
   constructor(private readonly provider: Provider) {
     this.profileKeys = [...provider.secrets.map((field) => field.key), "baseUrl", ...endpointFields(provider).map((field) => field.key)];
-    this.configKeys = configKeys(provider);
   }
 
   dir(): string {
@@ -70,20 +58,22 @@ export class ConfigStore {
     const path = this.configPath();
     if (!existsSync(path)) return {};
     const value = this.readJsonFile(path);
-    this.assertOnlyKeys(value, this.configKeys, path);
+    const unknown = Object.keys(value).find((key) => !CONFIG_KEYS.includes(key));
+    if (unknown) {
+      throw new CliError("CONFIGURATION_ERROR", `${path} has unknown key "${unknown}". Allowed keys: ${CONFIG_KEYS.join(", ")}.`, {
+        hint: `Credentials and endpoint settings live in profiles. Note the value of "${unknown}", remove the key from ${path}, then store the value in a profile with '${this.provider.bin} profiles update NAME'.`,
+      });
+    }
     const activeProfile = this.storedString(value, "activeProfile", path);
-    if (activeProfile !== undefined && !isValidProfileName(activeProfile)) {
+    if (activeProfile === undefined) return {};
+    if (!isValidProfileName(activeProfile)) {
       throw this.fileError(`activeProfile in ${path} must ${PROFILE_NAME_CONSTRAINT}; received "${echoable(activeProfile)}".`);
     }
-    const config: AppConfig = {};
-    if (activeProfile !== undefined) config.activeProfile = activeProfile;
-    this.readSettings(value, path, config);
-    return config;
+    return { activeProfile };
   }
 
   writeConfig(config: AppConfig): void {
-    const ordered = Object.fromEntries(this.configKeys.filter((key) => config[key] !== undefined).map((key) => [key, config[key]]));
-    this.writeSecureJson(this.configPath(), ordered);
+    this.writeSecureJson(this.configPath(), config.activeProfile === undefined ? {} : { activeProfile: config.activeProfile });
   }
 
   listProfileNames(): string[] {

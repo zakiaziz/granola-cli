@@ -1,6 +1,6 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
 import { CliError } from "./errors.js";
-import { variableName } from "./fields.js";
+import { kebab, upperSnake } from "./fields.js";
 import type { Provider, SecretField } from "./provider.js";
 import { listWords } from "./values.js";
 
@@ -10,10 +10,10 @@ export interface FieldSet {
   fields: SecretField[];
 }
 
+/** The credential fields a profile stores. */
 export interface Credential {
-  /** Field values. A first-complete provider holds one complete set. A per-request provider holds every field supplied. */
+  /** Field values. A single-set provider holds one complete set. A per-request provider holds every field stored. */
   values: Record<string, string>;
-  source: "environment" | "profile";
 }
 
 export function isSecret(field: SecretField): boolean {
@@ -32,16 +32,13 @@ export function fieldSets(provider: Provider): FieldSet[] {
   }));
 }
 
+/** True when the provider declares credential sets: each command or check names the one it needs. */
 export function isPerRequest(provider: Provider): boolean {
-  return provider.credentialSelection === "per-request";
+  return provider.credentialSets !== undefined;
 }
 
 export function setLabel(set: FieldSet): string {
   return set.fields.map((field) => field.label).join(" and ");
-}
-
-export function setVariables(provider: Provider, set: FieldSet): string {
-  return set.fields.map((field) => variableName(provider, field.key)).join(" and ");
 }
 
 /** The credential noun for help and errors: every set's label, joined by "or". */
@@ -49,44 +46,22 @@ export function credentialNoun(provider: Provider, sets: readonly FieldSet[] = f
   return sets.map(setLabel).join(" or ");
 }
 
-/** The variables that supply a credential: every set's variables, joined by "or". */
-export function credentialVariables(provider: Provider, sets: readonly FieldSet[] = fieldSets(provider)): string {
-  return sets.map((set) => setVariables(provider, set)).join(", or ");
+/** The option that stores a field: --api-key-file PATH for a secret, --email EMAIL for a field that is not secret. */
+export function fieldOption(field: SecretField): { name: string; placeholder: string } {
+  return isSecret(field)
+    ? { name: `${kebab(field.key)}-file`, placeholder: "PATH" }
+    : { name: kebab(field.key), placeholder: field.placeholder ?? upperSnake(field.key) };
 }
 
-/** How a source reports an incomplete set, and fields that come from more than one set. */
-export interface SourceText {
-  incomplete(set: FieldSet, missing: SecretField[]): CliError;
-  /** supplied lists the supplied fields of each set that has any, in set order. */
-  mixed(supplied: readonly SecretField[][]): CliError;
-}
-
-function isSupplied(supplied: Readonly<Record<string, string | undefined>>, field: SecretField): boolean {
-  return supplied[field.key] !== undefined;
-}
-
-/**
- * Picks the credential a source supplies (STYLE-CFG-2). A source that supplies any field is the source. First-complete
- * providers take the one complete set the source supplies, and fail when the source supplies fields of more than one
- * set (the source says which) or when its set is incomplete. Per-request providers keep every supplied field, and the
- * request that names a set checks it.
- */
-export function credentialFrom(
-  provider: Provider,
-  supplied: Readonly<Record<string, string | undefined>>,
-  source: Credential["source"],
-  text: SourceText,
-): Credential | undefined {
-  const sets = fieldSets(provider);
-  if (!sets.some((set) => set.fields.some((field) => isSupplied(supplied, field)))) return undefined;
-  if (isPerRequest(provider)) return { values: definedValues(provider.secrets, supplied), source };
-  const supplying = sets.filter((set) => set.fields.some((field) => isSupplied(supplied, field)));
-  if (supplying.length > 1) throw text.mixed(supplying.map((set) => set.fields.filter((field) => isSupplied(supplied, field))));
-  const set = supplying[0];
-  if (!set) return undefined;
-  const missing = set.fields.filter((field) => !isSupplied(supplied, field));
-  if (missing.length > 0) throw text.incomplete(set, missing);
-  return { values: definedValues(set.fields, supplied), source };
+/** The options that store every field of the sets, as `--name PLACEHOLDER` words joined by the given word. */
+export function credentialOptionsText(sets: readonly FieldSet[], join: "and" | "or" = "and"): string {
+  return listWords(
+    sets.flatMap((set) => set.fields.map((field) => {
+      const option = fieldOption(field);
+      return `--${option.name} ${option.placeholder}`;
+    })),
+    join,
+  );
 }
 
 function definedValues(fields: readonly SecretField[], supplied: Readonly<Record<string, string | undefined>>): Record<string, string> {
@@ -99,14 +74,34 @@ function definedValues(fields: readonly SecretField[], supplied: Readonly<Record
 }
 
 /**
- * The credential a request sends, or undefined when none is available. A first-complete credential is already one
- * set. A per-request credential narrows to the named set, which must be complete.
+ * The credential a profile stores, or undefined when it stores none. A single-set provider needs the complete set and
+ * throws incomplete for a partial one. A per-request provider keeps every stored field, and the request that names a
+ * set checks it.
+ */
+export function credentialFrom(
+  provider: Provider,
+  stored: Readonly<Record<string, string | undefined>>,
+  incomplete: (set: FieldSet, missing: SecretField[]) => CliError,
+): Credential | undefined {
+  const sets = fieldSets(provider);
+  if (!sets.some((set) => set.fields.some((field) => stored[field.key] !== undefined))) return undefined;
+  if (isPerRequest(provider)) return { values: definedValues(provider.secrets, stored) };
+  const [set] = sets;
+  if (!set) return undefined;
+  const missing = set.fields.filter((field) => stored[field.key] === undefined);
+  if (missing.length > 0) throw incomplete(set, missing);
+  return { values: definedValues(set.fields, stored) };
+}
+
+/**
+ * The credential a request sends, or undefined when none is available. A single-set credential is already one set. A
+ * per-request credential narrows to the named set, which must be complete.
  */
 export function credentialFor(provider: Provider, credential: Credential | undefined, setName: string | undefined): Credential | undefined {
   if (!credential || !isPerRequest(provider)) return credential;
   const set = requestedSet(provider, setName);
   if (!set.fields.every((field) => credential.values[field.key] !== undefined)) return undefined;
-  return { ...credential, values: definedValues(set.fields, credential.values) };
+  return { values: definedValues(set.fields, credential.values) };
 }
 
 export function requestedSet(provider: Provider, setName: string | undefined): FieldSet {

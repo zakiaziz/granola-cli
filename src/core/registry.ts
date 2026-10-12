@@ -146,7 +146,7 @@ export const GLOBAL_OPTIONS: readonly OptionSpec[] = [
     placeholder: "FORMAT",
     type: "enum",
     choices: ["json", "pretty", "human"],
-    default: "json",
+    default: "human",
     description: "Output format.",
   },
   {
@@ -206,7 +206,7 @@ export const FILE_OPTION: OptionSpec = {
   description: "Read the complete JSON input from PATH. - reads stdin.",
 };
 
-/** The default option that names a credential set when the provider selects credentials per request. */
+/** The default option that names a credential set when the provider declares credentialSets. */
 export const DEFAULT_CREDENTIAL_OPTION: CredentialOptionName = { name: "credential", placeholder: "CREDENTIAL", noun: "credential" };
 
 export interface CredentialOptionName {
@@ -228,7 +228,7 @@ export function credentialOption(names: readonly string[], definition: Credentia
     choices: [...names],
     ...(use === "send" ? { required: true } : {}),
     description:
-      use === "send" ? `${noun} to send.` : `${noun} to verify. Without it, every ${definition.noun} that is available is verified.`,
+      use === "send" ? `${noun} to send.` : `${noun} to verify. Without it, every ${definition.noun} that the profile stores is verified.`,
   };
 }
 

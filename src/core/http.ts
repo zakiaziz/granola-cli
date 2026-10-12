@@ -1,8 +1,8 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
-import { reportedProfile, type Access } from "./access.js";
-import { credentialNoun, credentialVariables, isSecret, type Credential } from "./credentials.js";
+import type { Access } from "./access.js";
+import { credentialNoun, credentialOptionsText, isSecret, setsFor, type Credential } from "./credentials.js";
 import { asCliError, CliError, failureCode, httpFailure, waitHint, type ErrorCode, type PagePartial, type ProviderInfo, type StepError, type StepPartial } from "./errors.js";
-import { printDiagnostic } from "./output.js";
+import { announceProfile, printDiagnostic } from "./output.js";
 import type { Provider } from "./provider.js";
 import type { HttpMethod } from "./types.js";
 import { isRecord, redactUrl, REDACTED, sensitiveValues, WHOLE_TOKEN_BELOW } from "./values.js";
@@ -31,6 +31,8 @@ export interface PlanEnvironment {
   provider: Provider;
   access: Access;
   credential: Credential | undefined;
+  /** The credential set the request sends, when the provider declares credentialSets. */
+  setName?: string | undefined;
   timeoutMs: number;
 }
 
@@ -43,7 +45,9 @@ export interface RequestPlan {
   safe: boolean;
   raw: boolean;
   timeoutMs: number;
-  profile: string | null;
+  profile: string;
+  /** The credential set the request sends, when the provider declares credentialSets. */
+  setName?: string | undefined;
   /** Header names that authorize() produced. Previews hide their values whatever the names. */
   credentialHeaders: string[];
   /** Values scrubbed from every provider text wherever they appear, longest first. */
@@ -75,7 +79,8 @@ export function buildPlan(input: PlanInput, environment: PlanEnvironment): Reque
     safe: !input.mutation,
     raw: input.raw,
     timeoutMs: environment.timeoutMs,
-    profile: reportedProfile(access),
+    profile: access.profileName,
+    setName: environment.setName,
     credentialHeaders: Object.keys(credentialHeaders),
     ...scrubbedValues(provider, credential, credentialHeaders, input),
   };
@@ -115,6 +120,7 @@ function scrubbedValues(
  * failure is thrown instead.
  */
 export async function performRequest(plan: RequestPlan, deadline?: number): Promise<Exchange> {
+  announceProfile(plan.profile);
   const attempts = plan.safe ? MAX_ATTEMPTS : 1;
   for (let attempt = 1; ; attempt += 1) {
     const left = deadline === undefined ? Number.POSITIVE_INFINITY : deadline - Date.now();
@@ -334,12 +340,13 @@ export function providerFailure(
   rawCode: string | number | undefined = provider.code,
 ): CliError {
   const { provider: definition } = plan;
-  const noun = credentialNoun(definition);
+  const sets = setsFor(definition, plan.setName);
+  const noun = credentialNoun(definition, sets);
   return httpFailure(status, provider, {
     providerName: definition.name,
     message,
     mutation: !plan.safe,
-    authenticationHint: `Set ${credentialVariables(definition)} to a valid ${noun}, or run '${definition.bin} setup'.`,
+    authenticationHint: `Store a valid ${noun} in profile "${plan.profile}": run '${definition.bin} profiles update ${plan.profile}' with ${credentialOptionsText(sets)}.`,
     permissionHint: `Check that the ${noun} can access this resource.`,
     code: mappedCode(plan, rawCode),
   });

@@ -2,7 +2,7 @@
 import { createInterface, type Interface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { CliError } from "./errors.js";
-import { exitInterrupted } from "./output.js";
+import { exitInterrupted, noteProfileShown } from "./output.js";
 import type { GlobalOptions } from "./types.js";
 import { echoable } from "./values.js";
 
@@ -18,9 +18,8 @@ export interface ShownChange {
 
 export interface ConfirmationRequest {
   providerName: string;
-  /** Resolved profile name, or null when the credential comes from the environment. */
-  profile: string | null;
-  credentialVariables: string;
+  /** The profile that supplies the credential and endpoint. */
+  profile: string;
   operation: string;
   requests: { method: string; url: string }[];
   changes: ShownChange[];
@@ -51,6 +50,7 @@ export async function confirmMutation(
       { hint: "Re-run with --yes to confirm or --dry-run to preview." },
     );
   }
+  noteProfileShown();
   const answer = await ask(confirmationSummary(request), CONFIRMATION_PROMPT);
   if (/^y(es)?$/i.test(answer.trim())) return;
   throw new CliError("CONFIRMATION_DECLINED", "Cancelled. Nothing was sent.");
@@ -114,14 +114,13 @@ function readAnswer(readline: Interface, prompt: string): Promise<string> {
 }
 
 function confirmationSummary(request: ConfirmationRequest): string {
-  const profile = request.profile ?? `none (credentials from ${request.credentialVariables})`;
   const requests = request.requests.map((item) => `  Request:    ${item.method} ${item.url}\n`).join("");
   const changes = request.changes
     .map((item) => `  Change:     ${echoable(item.field)}: ${shownValue(item.before)} -> ${shownValue(item.after)}\n`)
     .join("");
   return [
     `Confirm ${request.providerName} mutation\n`,
-    `  Profile:    ${profile}\n`,
+    `  Profile:    ${request.profile}\n`,
     `  Operation:  ${request.operation}\n`,
     requests,
     changes,

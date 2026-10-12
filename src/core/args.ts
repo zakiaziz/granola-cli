@@ -43,8 +43,8 @@ export function prescanPresentation(argv: readonly string[]): { format: OutputFo
   const color = lastValue(tokens, "--color");
   const validFormat = format === undefined || ["json", "pretty", "human"].includes(format);
   const validColor = color === undefined || ["auto", "always", "never"].includes(color);
-  if (!validFormat || !validColor) return { format: "json", color: "auto" };
-  return { format: (format ?? "json") as OutputFormat, color: (color ?? "auto") as ColorMode };
+  if (!validFormat || !validColor) return { format: "human", color: "auto" };
+  return { format: (format ?? "human") as OutputFormat, color: (color ?? "auto") as ColorMode };
 }
 
 function lastValue(tokens: readonly string[], name: string): string | undefined {
@@ -110,18 +110,20 @@ class Parser {
 
   private parseWithoutCommand(head: readonly string[], tail: readonly string[], words: readonly string[], matched: number): Invocation {
     if (words.length > 0 && head.includes("--version")) throw this.versionError(words);
-    if (words.length > 0) throw this.resolutionError(words, matched);
+    const group = words.length > 0 && words.length === matched;
+    if (words.length > 0 && !group) throw this.resolutionError(words, matched);
     const root = optionsByName(acceptedGlobals("root"));
     const seen = new Map<string, RawOption>();
-    for (let index = 0; index < head.length; index += 1) {
+    for (let index = group ? words.length : 0; index < head.length; index += 1) {
       const token = head[index] ?? "";
-      if (!isOptionToken(token)) throw this.rootWordError(head);
+      if (!isOptionToken(token)) throw group ? this.resolutionError([...words, token], matched) : this.rootWordError(head);
       const parsed = this.parseOptionToken(token, head[index + 1], root, undefined);
       if (parsed.consumedNext) index += 1;
       this.record(seen, parsed.option, parsed.value);
     }
-    if (tail.length > 0) throw this.resolutionError([tail[0] ?? ""], 0);
+    if (tail.length > 0) throw this.resolutionError(group ? [...words, tail[0] ?? ""] : [tail[0] ?? ""], group ? matched : 0);
     this.checkConflicts(seen, undefined);
+    if (group) return { kind: "help", path: [...words] };
     return seen.has("version") ? { kind: "version" } : { kind: "help", path: [] };
   }
 
@@ -143,9 +145,6 @@ class Parser {
     const group = words.slice(0, matched).join(" ");
     const expected = this.registry.nextWords(words.slice(0, matched)).join(", ");
     const hint = `Run '${this.bin} ${group} --help'.`;
-    if (words.length === matched) {
-      return usageError(`Missing action for "${group}". Expected one of: ${expected}.`, hint);
-    }
     return usageError(`Unknown action "${words[matched]}" for "${group}". Expected one of: ${expected}.`, hint);
   }
 
@@ -264,7 +263,7 @@ class Parser {
     const profile = values.profile;
     return {
       ...(typeof profile === "string" ? { profile } : {}),
-      format: (values.format as OutputFormat | undefined) ?? "json",
+      format: (values.format as OutputFormat | undefined) ?? "human",
       color: (values.color as ColorMode | undefined) ?? "auto",
       quiet: values.quiet === true,
       verbose: values.verbose === true,

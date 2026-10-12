@@ -37,11 +37,11 @@ export const commands: ResourceCommand[] = [
       },
     ],
     effects: { kind: "read" },
-    output: "Collection envelope. data is an array of notes; meta holds next_cursor and has_more.",
+    output: "Collection envelope. data is an array of notes; meta holds profile, next_cursor, and has_more.",
     method: "GET",
     collectionKey: "notes",
     pagination: { max: 30, default: 10, ordering: PROVIDER_ORDER },
-    examples: ["granola notes list --created-after 2026-08-01", "granola notes list --all --max-items 100 --format human"],
+    examples: ["granola notes list --created-after 2026-08-01", "granola notes list --all --max-items 100 --format json"],
     request: (context) => ({
       path: "/v1/notes",
       query: [
@@ -67,7 +67,7 @@ export const commands: ResourceCommand[] = [
       },
     ],
     effects: { kind: "read" },
-    output: "Resource envelope. data is the note object; meta is empty.",
+    output: "Resource envelope. data is the note object; meta has profile.",
     method: "GET",
     emptyIsNotFound: true,
     examples: ["granola notes get not_1d3tmYTlCICgjy", "granola notes get not_1d3tmYTlCICgjy --include transcript"],
@@ -82,11 +82,11 @@ export const commands: ResourceCommand[] = [
     arguments: [NOTE_ID],
     options: [],
     effects: { kind: "read" },
-    output: "Collection envelope. data is an array of transcript items; meta holds next_cursor and has_more.",
+    output: "Collection envelope. data is an array of transcript items; meta holds profile, next_cursor, and has_more.",
     method: "GET",
     collectionKey: "transcript",
     pagination: { max: 100, default: 50, ordering: PROVIDER_ORDER },
-    examples: ["granola notes transcript get not_1d3tmYTlCICgjy --all --format human"],
+    examples: ["granola notes transcript get not_1d3tmYTlCICgjy --all --format json"],
     request: (context) => ({ path: `/v1/notes/${encodedId(context)}/transcript` }),
   },
   {
@@ -95,7 +95,7 @@ export const commands: ResourceCommand[] = [
     arguments: [],
     options: [],
     effects: { kind: "read" },
-    output: "Collection envelope. data is an array of folders; meta holds next_cursor and has_more.",
+    output: "Collection envelope. data is an array of folders; meta holds profile, next_cursor, and has_more.",
     method: "GET",
     collectionKey: "folders",
     pagination: { max: 30, default: 10, ordering: "Alphabetical by folder name; the CLI does not sort." },
@@ -118,7 +118,7 @@ export const commands: ResourceCommand[] = [
     ],
     effects: { kind: "read" },
     output:
-      "Collection envelope. data is an array of audit events; meta holds next_cursor and has_more. Granola keeps audit events for a limited retention window.",
+      "Collection envelope. data is an array of audit events; meta holds profile, next_cursor, and has_more. Granola keeps audit events for a limited retention window.",
     method: "GET",
     collectionKey: "events",
     pagination: { max: 30, default: 30, ordering: PROVIDER_ORDER },
@@ -138,11 +138,11 @@ export const commands: ResourceCommand[] = [
     arguments: [],
     options: [],
     effects: { kind: "read" },
-    output: "Collection envelope. data is an array of webhook endpoints; meta is empty.",
+    output: "Collection envelope. data is an array of webhook endpoints; meta has profile.",
     method: "GET",
     collectionKey: "webhook_endpoints",
-    unpaginated: "Not paginated. Granola returns the full list in one response; meta is empty.",
-    examples: ["granola webhooks list --format human"],
+    unpaginated: "Not paginated. Granola returns the full list in one response; meta has profile.",
+    examples: ["granola webhooks list --format json"],
     request: () => ({ path: "/v1/webhook-endpoints" }),
   },
   {
@@ -175,7 +175,7 @@ export const commands: ResourceCommand[] = [
       summary:
         "Creates a webhook endpoint. The response includes signing_secret, which Granola returns only once. Redirect the output to a protected file. Dry runs and confirmation prompts replace the path, query, and fragment of callback URLs with /[redacted].",
     },
-    output: "Resource envelope. data is the webhook endpoint object, including signing_secret; meta is empty.",
+    output: "Resource envelope. data is the webhook endpoint object, including signing_secret; meta has profile.",
     exceptions: [
       {
         rule: "CLI-CFG-4",
@@ -226,7 +226,7 @@ export const commands: ResourceCommand[] = [
       summary:
         "Updates the supplied fields of the webhook endpoint. Omitted fields keep their values. Needs at least one field to change.",
     },
-    output: "Resource envelope. data is the updated webhook endpoint object; meta is empty.",
+    output: "Resource envelope. data is the updated webhook endpoint object; meta has profile.",
     method: "PATCH",
     examples: ["granola webhooks update whe_01HXYZ --enabled false --dry-run", "granola webhooks update whe_01HXYZ --event note.edited --yes"],
     request: (context) => webhookRequest(`/v1/webhook-endpoints/${encodedId(context)}`, context, false),
@@ -240,7 +240,7 @@ export const commands: ResourceCommand[] = [
       kind: "remote-mutation",
       summary: "Permanently deletes the webhook endpoint. Granola documents no way to restore a deleted endpoint.",
     },
-    output: "Resource envelope. data is the provider response, or null for an empty body; meta is empty.",
+    output: "Resource envelope. data is the provider response, or null for an empty body; meta has profile.",
     method: "DELETE",
     examples: ["granola webhooks delete whe_01HXYZ --dry-run", "granola webhooks delete whe_01HXYZ --yes"],
     request: (context) => ({

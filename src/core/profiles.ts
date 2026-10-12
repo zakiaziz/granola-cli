@@ -1,16 +1,11 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
-import {
-  environmentBaseUrl,
-  environmentCredential,
-  environmentField,
-  type Tool,
-} from "./access.js";
+import type { Tool } from "./access.js";
 import { stdinCarriesContent } from "./client.js";
 import { canPrompt, promptHidden, promptVisible } from "./confirm.js";
-import { checkProfileName, configKeys, writableConfigKeys, type Profile } from "./config.js";
-import { credentialNoun, credentialVariables, fieldSets, isPerRequest, isSecret, setLabel, type FieldSet } from "./credentials.js";
+import { checkProfileName, CONFIG_KEYS, type Profile } from "./config.js";
+import { credentialNoun, credentialOptionsText, fieldOption, fieldSets, isPerRequest, isSecret, setLabel, type FieldSet } from "./credentials.js";
 import { asCliError, CliError, usageError, type ErrorCode } from "./errors.js";
-import { baseUrlExample, derivingField, endpointFields, fieldConstraint, fieldExample, fieldPlaceholder, kebab, upperSnake, variableName } from "./fields.js";
+import { baseUrlExample, derivingField, endpointFields, fieldConstraint, fieldExample, fieldPlaceholder, kebab, upperSnake } from "./fields.js";
 import { printDiagnostic, printResult } from "./output.js";
 import type { EndpointField, Provider, SecretField } from "./provider.js";
 import { failureList, type ArgumentSpec, type CommandSpec, type Context, type OptionSpec } from "./registry.js";
@@ -43,14 +38,12 @@ class ProfileCommands {
   private readonly bin: string;
   private readonly sets: FieldSet[];
   private readonly settings: readonly EndpointField[];
-  private readonly baseUrlVariable: string;
 
   constructor(private readonly tool: Tool) {
     this.provider = tool.provider;
     this.bin = tool.provider.bin;
     this.sets = fieldSets(tool.provider);
     this.settings = endpointFields(tool.provider);
-    this.baseUrlVariable = variableName(tool.provider, "baseUrl");
   }
 
   commands(): CommandSpec[] {
@@ -60,21 +53,18 @@ class ProfileCommands {
   // Option specs
 
   private credentialOptionName(field: SecretField): string {
-    return isSecret(field) ? `${kebab(field.key)}-file` : kebab(field.key);
+    return fieldOption(field).name;
   }
 
   private credentialOptions(): OptionSpec[] {
-    return this.sets.flatMap((set, index) =>
+    return this.sets.flatMap((set) =>
       set.fields.map((field): OptionSpec => {
-        const earlier = this.sets.slice(0, index).flatMap((other) => other.fields.map((item) => this.credentialOptionName(item)));
-        const conflicts = isPerRequest(this.provider) || earlier.length === 0 ? {} : { conflicts: earlier };
         if (isSecret(field)) {
           return {
             name: this.credentialOptionName(field),
             placeholder: "PATH",
             type: "path",
             description: `Read the ${this.provider.name} ${field.label} from PATH. - reads stdin.`,
-            ...conflicts,
           };
         }
         const flag = `--${this.credentialOptionName(field)}`;
@@ -84,7 +74,6 @@ class ProfileCommands {
           type: "string",
           description: `${this.provider.name} ${field.label} to store in the profile.`,
           check: (value) => this.checkedCredential(field, flag, value),
-          ...conflicts,
         };
       }),
     );
@@ -105,8 +94,8 @@ class ProfileCommands {
     return this.settings.map((field) => {
       const flag = `--${kebab(field.key)}`;
       const lead = change ? `Replace the stored ${field.label}.` : `${this.provider.name} ${field.label} to store in the profile.`;
-      const fallback = field.default === undefined ? "" : ` Default when no source sets it: ${field.default}.`;
-      const derives = field === deriving ? " Chooses the API base URL. Ignored while a base URL is set in the same source." : "";
+      const fallback = field.default === undefined ? "" : ` Default when the profile does not set it: ${field.default}.`;
+      const derives = field === deriving ? " Chooses the API base URL. Ignored while the profile stores a base URL." : "";
       return {
         name: kebab(field.key),
         placeholder: fieldPlaceholder(field),
@@ -125,14 +114,14 @@ class ProfileCommands {
         name: "clear-base-url",
         type: "boolean",
         conflicts: ["base-url"],
-        description: "Remove the stored base URL so the next source in the precedence order applies.",
+        description: "Remove the stored base URL.",
       },
       ...this.settings.map(
         (field): OptionSpec => ({
           name: `clear-${kebab(field.key)}`,
           type: "boolean",
           conflicts: [kebab(field.key)],
-          description: `Remove the stored ${field.label} so the next source in the precedence order applies.`,
+          description: `Remove the stored ${field.label}.${field.default === undefined ? "" : ` The default ${field.default} then applies.`}`,
         }),
       ),
     ];
@@ -151,18 +140,9 @@ class ProfileCommands {
     return options.map((option) => option.name);
   }
 
-  private variables(): string[] {
-    return [
-      ...this.provider.secrets.map((field) => variableName(this.provider, field.key)),
-      this.baseUrlVariable,
-      ...this.settings.map((field) => variableName(this.provider, field.key)),
-    ];
-  }
-
-  /** The credential options a first example shows: the first set, or every field when sets are all available. */
+  /** The credential options a first example shows: every field of every set. */
   private exampleOptions(): string {
-    const sets = isPerRequest(this.provider) ? this.sets : this.sets.slice(0, 1);
-    const credential = sets.flatMap((set) =>
+    const credential = this.sets.flatMap((set) =>
       set.fields.map((field) => {
         if (isSecret(field)) return ` --${this.credentialOptionName(field)} ./${this.bin}-${kebab(field.key)}.txt`;
         return ` --${this.credentialOptionName(field)} ${field.example ?? field.placeholder ?? upperSnake(field.key)}`;
@@ -178,67 +158,44 @@ class ProfileCommands {
     const deriving = derivingField(this.provider);
     const derivedDefault = deriving?.default === undefined ? undefined : deriving.baseUrl?.(deriving.default);
     const fallback = this.provider.baseUrl.default ?? derivedDefault;
-    const variables = deriving ? `${variableName(this.provider, deriving.key)} or ${this.baseUrlVariable}` : this.baseUrlVariable;
     const ending = fallback === undefined ? "then no default, which fails with CONFIGURATION_ERROR" : `then ${fallback}`;
-    const lines = [`Endpoint: ${variables}, the selected profile, config.json, ${ending}.`];
-    if (deriving) lines.push(`Within one source a base URL beats the ${deriving.label}.`);
+    const lines = [`Endpoint: the base URL${deriving ? ` or the ${deriving.label}` : ""} stored in the profile, ${ending}.`];
+    if (deriving) lines.push(`A stored base URL beats the ${deriving.label}.`);
     const others = this.settings.filter((field) => field !== deriving);
     if (others.length === 0) return lines;
-    const names = others.map((field) => variableName(this.provider, field.key));
-    return [...lines, `Settings (${names.join(", ")}): the environment variable, the selected profile, config.json, then the default where the setting has one.`];
+    return [...lines, `Settings (${others.map((field) => field.label).join(", ")}): the value stored in the profile, then the default where the setting has one.`];
   }
 
   // Specs
 
   private setupSpec(): CommandSpec {
-    const creating = this.newProfileOptions().map((option) => option.name);
     const noun = credentialNoun(this.provider, this.sets);
     return {
       path: ["setup"],
       summary: "Create and activate a profile.",
       arguments: [{ name: "NAME", description: "Profile name. Default: default.", optional: true, check: checkName }],
-      options: [
-        ...this.newProfileOptions(),
-        {
-          name: "from-env",
-          type: "boolean",
-          conflicts: creating,
-          description: `Copy ${listWords(this.variables(), "and")} into the profile.${this.oneSetNote()}`,
-        },
-      ],
+      options: this.newProfileOptions(),
       kind: "local",
       effects: {
         kind: "local-write",
         summary: [
           "Creates profile NAME, then makes it the active profile. Fails when the profile exists.",
           "If activation fails, the profile stays saved and setup exits 8 with PARTIAL_FAILURE.",
-          `${this.promptText(noun)} Secrets use hidden input.${this.visibleNote()}`,
-          `Profile selection: --profile, ${variableName(this.provider, "profile")}, then activeProfile in config.json. A selected or active profile that does not exist fails with CONFIGURATION_ERROR and never falls back.`,
-          `Credentials: ${credentialVariables(this.provider)}, then the selected profile.`,
+          `${this.promptText(noun)} Secrets use hidden input. Without a terminal, pass each secret with its --KEY-file PATH option; - reads stdin.${this.visibleNote()}`,
+          "Profile selection: --profile NAME, otherwise activeProfile in config.json. Credentials and endpoint settings come only from that profile. A selected or active profile that does not exist fails with CONFIGURATION_ERROR and never falls back.",
           ...this.endpointLines(),
           PROFILE_FILE_NOTE,
         ].join("\n"),
       },
       output: "Resource envelope. data has name, path, and active; meta is empty.",
       failures: failureList([...LOCAL_FAILURES, "AUTHENTICATION_REQUIRED", "CONFLICT", "PARTIAL_FAILURE"]),
-      examples: [`${this.bin} setup work${this.exampleOptions()}`, `${this.bin} setup --from-env`],
+      examples: [`${this.bin} setup work${this.exampleOptions()}`],
       run: (context) => this.setup(context),
     };
   }
 
-  /** True when a profile stores one of several credential sets and the user picks which. */
-  private choosesSet(): boolean {
-    return this.sets.length > 1 && !isPerRequest(this.provider);
-  }
-
-  private oneSetNote(): string {
-    return this.choosesSet() ? " The environment may supply the variables of one credential set only." : "";
-  }
-
   private promptText(noun: string): string {
-    if (!this.choosesSet()) return `On a terminal without --no-input, setup prompts for a missing ${noun}.`;
-    const names = listWords(this.sets.map((set) => set.name), "or");
-    return `On a terminal without --no-input, setup asks which credential to store (${names}) when no credential option is given, then prompts for the missing fields of that credential.`;
+    return `On a terminal without --no-input, setup prompts for a missing ${noun}.`;
   }
 
   private visibleNote(): string {
@@ -267,7 +224,7 @@ class ProfileCommands {
         output: "Collection envelope. data is an array of name and active; meta is empty.",
         unpaginated: "Not paginated. The command lists every saved profile; meta is empty.",
         failures: LOCAL_FAILURES,
-        examples: [`${bin} profiles list`, `${bin} profiles list --format human`],
+        examples: [`${bin} profiles list`, `${bin} profiles list --format json`],
         run: () => this.profilesList(),
       },
       {
@@ -302,7 +259,7 @@ class ProfileCommands {
         options: this.updateOptions(),
         effects: {
           kind: "local-write",
-          summary: `Merges the supplied fields into profile NAME and keeps the others. Needs at least one field. ${this.replaceNote()}${this.completeNote()}${PROFILE_FILE_NOTE}`,
+          summary: `Merges the supplied fields into profile NAME and keeps the others. Needs at least one field. ${this.completeNote()}${PROFILE_FILE_NOTE}`,
         },
         output: "Resource envelope. data has name, active, and path; meta is empty.",
         failures: failureList([...LOCAL_FAILURES, "NOT_FOUND"]),
@@ -337,38 +294,22 @@ class ProfileCommands {
     return "A credential that is supplied must be complete. ";
   }
 
-  private replaceNote(): string {
-    if (isPerRequest(this.provider) || this.sets.length < 2) return "";
-    return "Supplying the fields of another credential replaces the stored one. ";
-  }
-
   private configSpecs(): CommandSpec[] {
     const bin = this.bin;
     const base = { kind: "local" as const, options: [] as OptionSpec[], arguments: [] as ArgumentSpec[], failures: LOCAL_FAILURES };
-    const keys = configKeys(this.provider);
-    const writable = writableConfigKeys(this.provider);
     const key: ArgumentSpec = {
       name: "KEY",
       description: "Configuration key.",
-      choices: keys,
-      check: (value) => this.configKey(value, keys),
+      choices: [...CONFIG_KEYS],
+      check: (value) => this.configKey(value),
     };
-    const writableKey: ArgumentSpec = {
-      name: "KEY",
-      description: "Configuration key. Change activeProfile with profiles use.",
-      choices: writable,
-      check: (value) => this.writableConfigKey(value),
-    };
-    const example = this.settings[0];
-    const exampleKey = example ? example.key : "baseUrl";
-    const exampleValue = example ? fieldExample(example) : baseUrlExample(this.provider);
     return [
       {
         ...base,
         path: ["config", "list"],
         summary: "List every configuration key.",
         effects: { kind: "read", summary: "Reads config.json only." },
-        output: `Resource envelope. data has ${listWords(keys, "and")}, null when unset; meta is empty.`,
+        output: `Resource envelope. data has ${listWords([...CONFIG_KEYS], "and")}, null when unset; meta is empty.`,
         examples: [`${bin} config list`],
         run: () => this.configList(),
       },
@@ -379,28 +320,8 @@ class ProfileCommands {
         arguments: [key],
         effects: { kind: "read", summary: "Reads config.json only." },
         output: "Resource envelope. data has key and value, null when unset; meta is empty.",
-        examples: [`${bin} config get ${exampleKey}`, `${bin} config get activeProfile`],
+        examples: [`${bin} config get activeProfile`],
         run: (context) => this.configGet(context),
-      },
-      {
-        ...base,
-        path: ["config", "set"],
-        summary: "Set one configuration value.",
-        arguments: [writableKey, { name: "VALUE", description: "Literal string value, validated for the key." }],
-        effects: { kind: "local-write", summary: "Writes the key to config.json." },
-        output: "Resource envelope. data has key and value; meta is empty.",
-        examples: [`${bin} config set ${exampleKey} ${exampleValue}`],
-        run: (context) => this.configSet(context),
-      },
-      {
-        ...base,
-        path: ["config", "unset"],
-        summary: "Remove one configuration value.",
-        arguments: [writableKey],
-        effects: { kind: "local-write", summary: "Removes the key from config.json." },
-        output: "Resource envelope. data has key and a null value; meta is empty.",
-        examples: [`${bin} config unset ${exampleKey}`],
-        run: (context) => this.configUnset(context),
       },
       {
         ...base,
@@ -420,12 +341,10 @@ class ProfileCommands {
   private async setup(context: Context): Promise<void> {
     this.localDiagnostic();
     const name = context.args[0] ?? "default";
-    const fromEnvironment = context.options.flag("from-env");
     this.assertNewProfile(name);
     const config = this.tool.store.readConfig();
-    const input = fromEnvironment ? this.environmentInput() : this.optionInput(context);
-    const prompting = !fromEnvironment && canPrompt(context.globals, stdinCarriesContent(context));
-    const profile = await this.completeProfile(input, prompting);
+    const prompting = canPrompt(context.globals, stdinCarriesContent(context));
+    const profile = await this.completeProfile(this.optionInput(context), prompting);
     this.tool.store.writeProfile(name, profile);
     try {
       this.tool.store.writeConfig({ ...config, activeProfile: name });
@@ -446,18 +365,6 @@ class ProfileCommands {
         not_attempted: [],
       },
     });
-  }
-
-  /** Reads the profile values that setup --from-env copies: set credential, base URL, and endpoint variables. */
-  private environmentInput(): Profile {
-    const input: Profile = { ...(environmentCredential(this.provider, true)?.values ?? {}) };
-    const baseUrl = environmentBaseUrl(this.provider);
-    if (baseUrl !== undefined) input.baseUrl = baseUrl;
-    for (const field of this.settings) {
-      const value = environmentField(this.provider, field);
-      if (value !== undefined) input[field.key] = value;
-    }
-    return input;
   }
 
   /** Reads the profile values the options supply. Secret options read their files. */
@@ -508,39 +415,23 @@ class ProfileCommands {
     profile.baseUrl = this.checkedBaseUrl("The base URL", value, "--base-url");
   }
 
+  /**
+   * Completes the credential a new profile stores. A single-set provider prompts for the missing fields of its one set.
+   * A provider with credential sets prompts for the sets the options supplied, or for every set when none was
+   * supplied, where an empty answer skips a set. At least one set must end complete.
+   */
   private async completeCredential(profile: Profile, prompting: boolean): Promise<void> {
     const supplied = this.sets.filter((set) => set.fields.some((field) => profile[field.key] !== undefined));
     const perRequest = isPerRequest(this.provider);
-    const targets = supplied.length > 0 ? supplied : perRequest ? this.sets : [await this.chosenSet(prompting)];
+    const targets = supplied.length > 0 ? supplied : this.sets;
     const optional = perRequest && supplied.length === 0;
-    const unchosen = supplied.length === 0 && !perRequest && !prompting;
-    for (const set of targets) await this.completeSet(profile, set, prompting, optional, unchosen ? this.sets : [set]);
+    for (const set of targets) await this.completeSet(profile, set, prompting, optional);
     if (optional && !this.sets.some((set) => set.fields.every((field) => profile[field.key] !== undefined))) {
-      throw this.credentialRequired(this.sets[0]?.fields[0], this.sets);
+      throw this.credentialRequired(this.sets[0]?.fields[0]);
     }
   }
 
-  /**
-   * The set a first-complete setup prompts for when no option supplied a field. With several sets and a terminal it
-   * asks which one, because the first set is not a default the user agreed to.
-   */
-  private async chosenSet(prompting: boolean): Promise<FieldSet> {
-    const [first] = this.sets;
-    if (!first) throw new CliError("UNEXPECTED_ERROR", `${this.provider.name} declares no credential set.`);
-    if (this.sets.length === 1 || !prompting) return first;
-    const names = this.sets.map((set) => set.name);
-    const answer = (await promptVisible(this.provider.name, `credential (${listWords(names, "or")})`)).trim();
-    if (answer === "") throw this.credentialRequired(undefined, this.sets);
-    const chosen = this.sets.find((set) => set.name === answer);
-    if (chosen) return chosen;
-    throw usageError(`The credential must be one of ${names.join(", ")}; received "${echoable(answer)}".`, `Enter ${listWords(names, "or")}.`, {
-      received: echoable(answer),
-      allowed: names.join(", "),
-    });
-  }
-
-  /** alternatives are the sets the failure offers: the set being completed, or every set when none was chosen. */
-  private async completeSet(profile: Profile, set: FieldSet, prompting: boolean, optional: boolean, alternatives: readonly FieldSet[]): Promise<void> {
+  private async completeSet(profile: Profile, set: FieldSet, prompting: boolean, optional: boolean): Promise<void> {
     const missing = set.fields.filter((field) => profile[field.key] === undefined);
     for (const field of missing) {
       const value = prompting ? await this.promptField(field) : "";
@@ -552,7 +443,7 @@ class ProfileCommands {
         for (const item of set.fields) delete profile[item.key];
         return;
       }
-      throw this.credentialRequired(field, alternatives);
+      throw this.credentialRequired(field);
     }
   }
 
@@ -564,18 +455,11 @@ class ProfileCommands {
     return value;
   }
 
-  private credentialRequired(field: SecretField | undefined, alternatives: readonly FieldSet[]): CliError {
+  private credentialRequired(field: SecretField | undefined): CliError {
     const perRequest = isPerRequest(this.provider);
-    const optionOf = (item: SecretField): string =>
-      isSecret(item) ? `--${this.credentialOptionName(item)} PATH` : `--${this.credentialOptionName(item)} ${item.placeholder ?? upperSnake(item.key)}`;
-    const variableOf = (item: SecretField): string => variableName(this.provider, item.key);
-    const group = (items: string[]): string => (items.length > 1 && alternatives.length > 1 ? `(${listWords(items, "and")})` : listWords(items, "and"));
-    const options = perRequest ? alternatives.flatMap((set) => set.fields.map(optionOf)) : alternatives.map((set) => group(set.fields.map(optionOf)));
-    const variables = perRequest ? alternatives.flatMap((set) => set.fields.map(variableOf)) : alternatives.map((set) => group(set.fields.map(variableOf)));
-    const subject = perRequest ? credentialNoun(this.provider, this.sets) : field && alternatives.length === 1 ? field.label : credentialNoun(this.provider, alternatives);
-    const join = (items: string[]): string => (perRequest ? listWords(items, "or") : items.join(" or "));
+    const subject = perRequest || !field ? credentialNoun(this.provider, this.sets) : field.label;
     return new CliError("AUTHENTICATION_REQUIRED", `No ${this.provider.name} ${subject} was provided.`, {
-      hint: `Pass ${join(options)}, set ${join(variables)} with --from-env, or run setup in a terminal.`,
+      hint: `Pass ${credentialOptionsText(this.sets, perRequest ? "or" : "and")}, or run setup in a terminal.`,
     });
   }
 
@@ -625,7 +509,7 @@ class ProfileCommands {
     const existing = this.requireProfile(name);
     const active = this.isActive(name);
     const supplied = this.optionInput(context);
-    const merged: Profile = { ...this.withoutReplacedCredential(existing, supplied), ...supplied };
+    const merged: Profile = { ...existing, ...supplied };
     for (const key of clears) delete merged[key];
     this.assertCompleteCredential(merged);
     this.tool.store.writeProfile(name, merged);
@@ -638,30 +522,15 @@ class ProfileCommands {
     return keys.filter((key) => context.options.flag(`clear-${kebab(key)}`));
   }
 
-  /**
-   * Supplying the fields of one credential set replaces the stored fields of the others, so a profile never keeps
-   * two credentials. Providers that select credentials per request keep every stored set.
-   */
-  private withoutReplacedCredential(existing: Profile, supplied: Profile): Profile {
-    if (isPerRequest(this.provider)) return existing;
-    const touched = this.sets.filter((set) => set.fields.some((field) => supplied[field.key] !== undefined));
-    if (touched.length === 0) return existing;
-    const kept = new Set(touched.flatMap((set) => set.fields.map((field) => field.key)));
-    const secrets = this.provider.secrets.map((field) => field.key);
-    return Object.fromEntries(Object.entries(existing).filter(([key]) => !secrets.includes(key) || kept.has(key)));
-  }
-
   /** Rejects a profile that stores part of a credential: a partial set could never authenticate. */
   private assertCompleteCredential(profile: Profile): void {
-    const sets = this.sets.filter((set) => set.fields.some((field) => profile[field.key] !== undefined));
     const complete = (set: FieldSet): boolean => set.fields.every((field) => profile[field.key] !== undefined);
-    const partial = isPerRequest(this.provider) ? sets.find((set) => !complete(set)) : sets.length > 0 && !sets.some(complete) ? sets[0] : undefined;
+    const partial = this.sets.find((set) => set.fields.some((field) => profile[field.key] !== undefined) && !complete(set));
     if (!partial) return;
     const missing = partial.fields.filter((field) => profile[field.key] === undefined);
-    const options = missing.map((field) => (isSecret(field) ? `--${this.credentialOptionName(field)} PATH` : `--${this.credentialOptionName(field)} ${field.placeholder ?? upperSnake(field.key)}`));
     throw usageError(
       `The ${setLabel(partial)} must be complete; ${listWords(missing.map((field) => field.label), "and")} ${missing.length > 1 ? "are" : "is"} missing.`,
-      `Add ${listWords(options, "and")}.`,
+      `Add ${credentialOptionsText([{ name: partial.name, fields: missing }])}.`,
     );
   }
 
@@ -694,29 +563,13 @@ class ProfileCommands {
   private async configList(): Promise<void> {
     this.localDiagnostic();
     const config = this.tool.store.readConfig();
-    printResult(Object.fromEntries(configKeys(this.provider).map((key) => [key, config[key] ?? null])));
+    printResult({ activeProfile: config.activeProfile ?? null });
   }
 
   private async configGet(context: Context): Promise<void> {
     this.localDiagnostic();
     const key = context.args[0] ?? "";
-    printResult({ key, value: this.tool.store.readConfig()[key] ?? null });
-  }
-
-  private async configSet(context: Context): Promise<void> {
-    this.localDiagnostic();
-    const key = context.args[0] ?? "";
-    const value = this.checkedConfigValue(key, context.args[1] ?? "");
-    this.tool.store.writeConfig({ ...this.tool.store.readConfig(), [key]: value });
-    printResult({ key, value });
-  }
-
-  private async configUnset(context: Context): Promise<void> {
-    this.localDiagnostic();
-    const key = context.args[0] ?? "";
-    const { [key]: _removed, ...rest } = this.tool.store.readConfig();
-    this.tool.store.writeConfig(rest);
-    printResult({ key, value: null });
+    printResult({ key, value: this.tool.store.readConfig().activeProfile ?? null });
   }
 
   // Helpers
@@ -778,30 +631,14 @@ class ProfileCommands {
     throw invalidValue(flag, constraint, echoable(value), `Use ${flag} ${field.example ?? field.placeholder ?? upperSnake(field.key)}.`);
   }
 
-  private checkedConfigValue(key: string, value: string): string {
-    if (key === "baseUrl") return this.checkedBaseUrl("baseUrl", value, "VALUE");
-    const field = this.settings.find((candidate) => candidate.key === key);
-    if (!field) return value;
-    const constraint = fieldConstraint(field, value);
-    if (!constraint) return value;
-    throw invalidValue(key, constraint, echoable(value), `Use a ${field.label} such as ${fieldExample(field)}.`, field.choices?.join(", "));
-  }
-
-  private configKey(value: string, allowed: readonly string[]): string {
-    const found = allowed.find((key) => key === value);
+  private configKey(value: string): string {
+    const found = CONFIG_KEYS.find((key) => key === value);
     if (found) return found;
-    throw usageError(`KEY must be one of ${allowed.join(", ")}; received "${echoable(value)}".`, `Run '${this.bin} config list' for every key.`, {
+    throw usageError(`KEY must be one of ${CONFIG_KEYS.join(", ")}; received "${echoable(value)}".`, `Run '${this.bin} config list' for every key.`, {
       argument: "KEY",
       received: echoable(value),
-      allowed: allowed.join(", "),
+      allowed: CONFIG_KEYS.join(", "),
     });
-  }
-
-  private writableConfigKey(value: string): string {
-    if (value === "activeProfile") {
-      throw usageError("activeProfile is read-only through config set and unset.", `Run '${this.bin} profiles use NAME'.`);
-    }
-    return this.configKey(value, writableConfigKeys(this.provider));
   }
 }
 

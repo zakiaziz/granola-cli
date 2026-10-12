@@ -17,9 +17,11 @@ export interface Presentation {
   format: OutputFormat;
   color: ColorMode;
   verbose: boolean;
+  quiet: boolean;
 }
 
-let active: Presentation = { bin: "", format: "json", color: "auto", verbose: false };
+let active: Presentation = { bin: "", format: "human", color: "auto", verbose: false, quiet: false };
+let profileAnnounced = false;
 
 export function configureOutput(presentation: Presentation): void {
   active = presentation;
@@ -28,10 +30,26 @@ export function configureOutput(presentation: Presentation): void {
 export function printResult(data: unknown, meta: Record<string, unknown> = {}): void {
   const colored = colorApplies(process.stdout);
   if (active.format === "human") {
-    process.stdout.write(`${renderHuman(data, colored)}${humanMeta(meta)}\n`);
+    const text = meta.dry_run === true && isRecord(data) ? renderDryRun(data, meta, colored) : `${renderHuman(data, colored)}${humanMeta(meta)}`;
+    process.stdout.write(`${text}\n`);
     return;
   }
   process.stdout.write(renderJson({ data, meta }, colored));
+}
+
+/**
+ * Prints `Profile: NAME` in gray on stderr, once per run, before a network command's result (STYLE-OUT-9). Only pretty
+ * and human output on a terminal show it, and --quiet suppresses it. JSON output never prints it.
+ */
+export function announceProfile(name: string): void {
+  if (profileAnnounced || active.quiet || active.format === "json" || process.stderr.isTTY !== true) return;
+  profileAnnounced = true;
+  process.stderr.write(`${paint(`Profile: ${name}`, GRAY, colorApplies(process.stderr))}\n`);
+}
+
+/** The confirmation prompt already shows the profile, so the notice that follows it would repeat the line. */
+export function noteProfileShown(): void {
+  profileAnnounced = true;
 }
 
 export function printRaw(value: unknown): void {
@@ -160,9 +178,30 @@ function renderHuman(value: unknown, colored: boolean): string {
   return String(value);
 }
 
+/** A dry run shows its meta (dry_run, validation) beside the operation, then each request on its own lines (STYLE-OUT-6). */
+function renderDryRun(data: Record<string, unknown>, meta: Record<string, unknown>, colored: boolean): string {
+  const { requests, changes, ...head } = data;
+  const sections = [
+    renderHumanObject({ ...head, dry_run: meta.dry_run, validation: meta.validation }, colored),
+  ];
+  if (Array.isArray(changes) && changes.length > 0) sections.push(`${paint("changes:", BLUE, colored)}\n${fieldLines(changes, 1, colored).join("\n")}`);
+  const list = Array.isArray(requests) ? requests.filter(isRecord) : [];
+  list.forEach((request, index) => {
+    const { method, url, body, ...rest } = request;
+    const lines = [`${paint(`Request ${index + 1}:`, BLUE, colored)} ${nested(method)} ${nested(url)}`];
+    if (body !== undefined) lines.push(`  ${paint("body:", BLUE, colored)}`, ...valueLines(body, 2, colored));
+    if (Object.keys(rest).length > 0) lines.push(...fieldLines(rest, 1, colored));
+    sections.push(lines.join("\n"));
+  });
+  return sections.join("\n\n");
+}
+
 function renderHumanCollection(items: unknown[], colored: boolean): string {
   if (items.length === 0) return "No results.";
-  if (!items.every(isRecord)) return items.map(nested).join("\n");
+  if (!items.every(isRecord)) {
+    const plain = items.every((item) => item === null || typeof item !== "object");
+    return plain ? items.map(scalar).join("\n") : valueLines(items, 0, colored).join("\n");
+  }
   const columns = [...new Set(items.flatMap((item) => Object.keys(item)))];
   const rows = items.map((item) => columns.map((column) => cell(item[column])));
   const widths = columns.map((column, index) =>
@@ -177,20 +216,86 @@ function renderHumanCollection(items: unknown[], colored: boolean): string {
 }
 
 function renderHumanObject(value: Record<string, unknown>, colored: boolean): string {
-  const entries = Object.entries(value);
-  if (entries.length === 0) return "No result.";
-  const width = entries.reduce((longest, [key]) => Math.max(longest, key.length + 1), 0);
-  return entries
-    .map(([key, item]) => `${paint(`${key}:`, BLUE, colored)}${" ".repeat(width - key.length - 1)} ${nested(item)}`.trimEnd())
-    .join("\n");
+  if (Object.keys(value).length === 0) return "No result.";
+  return fieldLines(value, 0, colored).join("\n");
 }
 
+const INDENT = "  ";
+
+/** Labeled fields of one object at a depth. Nested objects and arrays become indented fields and lists, never inline JSON. */
+function fieldLines(value: unknown, depth: number, colored: boolean): string[] {
+  if (Array.isArray(value)) return valueLines(value, depth, colored);
+  if (!isRecord(value)) return [];
+  const pad = INDENT.repeat(depth);
+  const entries = Object.entries(value);
+  const width = entries.reduce((longest, [key]) => Math.max(longest, key.length + 1), 0);
+  return entries.flatMap(([key, item]) => {
+    const label = paint(`${key}:`, BLUE, colored);
+    if (isBlock(item)) return [`${pad}${label}`, ...valueLines(item, depth + 1, colored)];
+    return [`${pad}${label}${" ".repeat(width - key.length - 1)} ${scalar(item)}`.trimEnd()];
+  });
+}
+
+/** Lines for a value placed under a label: a list, an object's fields, or a multi-line string. */
+function valueLines(value: unknown, depth: number, colored: boolean): string[] {
+  const pad = INDENT.repeat(depth);
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => {
+      if (isRecord(item) && Object.keys(item).length > 0) {
+        const [first = "", ...rest] = fieldLines(item, 0, colored);
+        return [`${pad}- ${first}`, ...rest.map((line) => `${pad}  ${line}`)];
+      }
+      if (Array.isArray(item) && item.length > 0) {
+        const [first = "", ...rest] = valueLines(item, 0, colored);
+        return [`${pad}- ${first}`, ...rest.map((line) => `${pad}  ${line}`)];
+      }
+      const [first = "", ...rest] = scalar(item).split("\n");
+      return [`${pad}- ${first}`.trimEnd(), ...rest.map((line) => `${pad}  ${line}`.trimEnd())];
+    });
+  }
+  if (isRecord(value)) return fieldLines(value, depth, colored);
+  return scalar(value).split("\n").map((line) => `${pad}${line}`.trimEnd());
+}
+
+function isBlock(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (isRecord(value)) return Object.keys(value).length > 0;
+  return typeof value === "string" && value.includes("\n");
+}
+
+function scalar(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return "none";
+  if (isRecord(value)) return "none";
+  return String(value);
+}
+
+/** A table cell: scalars as text, an object by its name, an array by its length. Never raw JSON. */
 function cell(value: unknown): string {
-  const text = nested(value).replace(/\s+/g, " ");
+  const text = summary(value).replace(/\s+/g, " ");
   return text.length > MAX_CELL_LENGTH ? `${text.slice(0, MAX_CELL_LENGTH - 3)}...` : text;
 }
 
+const NAME_KEYS = ["displayName", "display_name", "name", "title", "label", "email", "id"];
+
+function summary(value: unknown): string {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "";
+    if (value.every((item) => item === null || typeof item !== "object")) {
+      const joined = value.map(String).join(", ");
+      if (joined.length <= MAX_CELL_LENGTH) return joined;
+    }
+    return `${value.length} ${value.length === 1 ? "item" : "items"}`;
+  }
+  if (isRecord(value)) {
+    const key = NAME_KEYS.find((name) => ["string", "number"].includes(typeof value[name]) && value[name] !== "");
+    if (key) return String(value[key]);
+    const count = Object.keys(value).length;
+    return count === 0 ? "" : `${count} ${count === 1 ? "field" : "fields"}`;
+  }
+  return scalar(value);
+}
+
 function nested(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  return typeof value === "object" ? JSON.stringify(value) : String(value);
+  return summary(value);
 }

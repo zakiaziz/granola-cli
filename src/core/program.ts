@@ -14,9 +14,10 @@ import type { PackageInfo } from "./types.js";
  * module as new URL("../package.json", import.meta.url) (STYLE-VER-1).
  */
 export function runCli(provider: Provider, packageUrl: URL): void {
-  configureOutput({ bin: provider.bin, format: "json", color: "auto", verbose: false });
+  const argv = process.argv.slice(2);
+  configureOutput({ bin: provider.bin, ...prescanPresentation(argv), verbose: false, quiet: false });
   process.once("SIGINT", exitInterrupted);
-  main(provider, packageUrl, process.argv.slice(2)).catch((error: unknown) => {
+  main(provider, packageUrl, argv).catch((error: unknown) => {
     const failure = asCliError(error);
     printError(failure);
     process.exitCode = failure.exitCode;
@@ -36,8 +37,8 @@ async function main(provider: Provider, packageUrl: URL, argv: readonly string[]
     return;
   }
   const { context } = invocation;
-  const { format, color, verbose } = context.globals;
-  configureOutput({ bin: provider.bin, format, color, verbose });
+  const { format, color, verbose, quiet } = context.globals;
+  configureOutput({ bin: provider.bin, format, color, verbose, quiet });
   await context.spec.run(context);
 }
 
@@ -45,7 +46,7 @@ function parse(registry: Registry, argv: readonly string[]): Invocation {
   try {
     return parseArgv(registry, argv);
   } catch (error) {
-    configureOutput({ bin: registry.bin, ...prescanPresentation(argv), verbose: false });
+    configureOutput({ bin: registry.bin, ...prescanPresentation(argv), verbose: false, quiet: false });
     throw error;
   }
 }

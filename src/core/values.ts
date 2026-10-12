@@ -108,13 +108,6 @@ export function invalidValue(subject: string, constraint: string, received: stri
   });
 }
 
-export function invalidVariable(variable: string, constraint: string, received: string, hint: string, allowed?: string): CliError {
-  return new CliError("CONFIGURATION_ERROR", `${variable} must ${constraint}; received "${received}".`, {
-    hint,
-    details: { variable, received, ...(allowed === undefined ? {} : { allowed }) },
-  });
-}
-
 export function missingFields(command: string, options: readonly string[], change: boolean): CliError {
   const names = options.map((option) => `--${option}`);
   const list = names.length <= 2 ? names.join(" or ") : `${names.slice(0, -1).join(", ")}, or ${names.at(-1)}`;
@@ -125,13 +118,6 @@ export function emptyValue(subject: string): CliError {
   return usageError(`${subject} must not be empty; received "".`, `Provide a value for ${subject}.`, {
     [subjectKind(subject)]: subject,
     received: "",
-  });
-}
-
-export function emptyVariable(variable: string): CliError {
-  return new CliError("CONFIGURATION_ERROR", `${variable} must not be empty; received "".`, {
-    hint: `Provide a value for ${variable}.`,
-    details: { variable, received: "" },
   });
 }
 

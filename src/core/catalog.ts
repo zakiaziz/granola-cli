@@ -77,7 +77,7 @@ function validateCredentials(provider: Provider): void {
   if (new Set(sets.map((set) => set.name)).size !== sets.length) fail("Two credential sets share a name.");
   const unassigned = provider.secrets.find((field) => !keys.includes(field.key));
   if (unassigned) fail(`Credential field "${unassigned.key}" belongs to no credential set.`);
-  if (isPerRequest(provider) && sets.length < 2) fail("Per-request credential selection needs at least two credential sets.");
+  if (isPerRequest(provider) && sets.length < 2) fail("credentialSets needs at least two credential sets.");
   if (provider.credentialSets && provider.credentialSets.some((set) => !/^[a-z][a-z0-9-]*$/.test(set.name))) {
     fail("Credential set names are lowercase kebab-case.");
   }
@@ -86,13 +86,13 @@ function validateCredentials(provider: Provider): void {
 }
 
 /** Keys of an auth verify result. The credential option's name, in snake case, leads each check of a verification of several. */
-const VERIFY_KEYS = ["verified", "profile", "credential_source", "base_url", "checks", "check", "scope", "identity"];
+const VERIFY_KEYS = ["verified", "profile", "base_url", "checks", "check", "scope", "identity"];
 const TAKEN_OPTIONS = ["query", "file", "yes", "dry-run", ...GLOBAL_OPTIONS.map((option) => option.name)];
 
 function validateCredentialOption(provider: Provider): void {
   const option = provider.credentialOption;
   if (!option) return;
-  if (!isPerRequest(provider)) fail("credentialOption needs per-request credential selection.");
+  if (!isPerRequest(provider)) fail("credentialOption needs credentialSets.");
   if (!/^[a-z][a-z0-9-]*$/.test(option.name)) fail(`credentialOption name "${option.name}" must be lowercase kebab-case.`);
   if (TAKEN_OPTIONS.includes(option.name)) fail(`credentialOption name "${option.name}" collides with another option.`);
   if (VERIFY_KEYS.includes(option.name.replaceAll("-", "_"))) fail(`credentialOption name "${option.name}" collides with a key of the auth verify result.`);
@@ -111,10 +111,10 @@ function validateApi(provider: Provider): void {
   if (checks.length === 0) fail("The provider has no verify check.");
   if (isPerRequest(provider)) {
     const names = checks.map((check) => check.credential);
-    if (names.some((name) => name === undefined)) fail("Per-request credential selection needs a credential on every verify check.");
+    if (names.some((name) => name === undefined)) fail("credentialSets needs a credential on every verify check.");
     if (new Set(names).size !== names.length) fail("Two verify checks use the same credential.");
   } else if (checks.length > 1) {
-    fail("Several verify checks need per-request credential selection.");
+    fail("Several verify checks need credentialSets.");
   }
 }
 
@@ -132,7 +132,7 @@ function validateCommand(provider: Provider, command: ResourceCommand): void {
   if (command.pagination && !style) fail(`${name} declares pagination, but neither it nor the provider has a pagination style.`);
   if (command.pagination?.window !== undefined && command.pagination.window < 1) fail(`${name} declares an empty pagination window.`);
   if (isPerRequest(provider) && command.credential === undefined) fail(`${name} must name its credential.`);
-  if (!isPerRequest(provider) && command.credential !== undefined) fail(`${name} names a credential, but the provider does not select credentials per request.`);
+  if (!isPerRequest(provider) && command.credential !== undefined) fail(`${name} names a credential, but the provider declares no credentialSets.`);
   if (isPerRequest(provider) && !fieldSets(provider).some((set) => set.name === command.credential)) {
     fail(`${name} names credential "${command.credential}", which is not a credential set.`);
   }

@@ -66,8 +66,9 @@ export function localCommand(command: LocalCommand): CommandSpec {
 }
 
 async function runCustom(tool: Tool, command: RunCommand, context: Context): Promise<void> {
-  const result = await command.run(context, new Client(tool, context, command.credential));
-  if (result) printResult(result.data, result.meta ?? {});
+  const client = new Client(tool, context, command.credential);
+  const result = await command.run(context, client);
+  if (result) printResult(result.data, client.meta(result.meta));
 }
 
 async function runRequest(tool: Tool, command: RequestCommand, context: Context, hasList: ListLookup): Promise<void> {
@@ -93,7 +94,7 @@ async function runRequest(tool: Tool, command: RequestCommand, context: Context,
       : await client.send(call);
   if (!shaped) return;
   if (command.emptyIsNotFound && isEmpty(shaped.data)) throw notFound(tool, command, context, hasList);
-  printResult(shaped.data, shaped.meta);
+  printResult(shaped.data, client.meta(shaped.meta));
 }
 
 async function mutate(client: Client, command: RequestCommand, call: Call, effect: string | undefined) {

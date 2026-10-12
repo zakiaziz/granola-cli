@@ -1,18 +1,10 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
-import {
-  credentialSource,
-  reportedProfile,
-  requireCredential,
-  resolveAccess,
-  Endpoint,
-  type Access,
-  type Tool,
-} from "./access.js";
-import { credentialFor, credentialVariables, setsFor } from "./credentials.js";
+import { requireCredential, resolveAccess, Endpoint, type Access, type Tool } from "./access.js";
+import { credentialFor } from "./credentials.js";
 import { confirmMutation, type ShownChange } from "./confirm.js";
 import { asCliError, CliError, stepsFailure, type ErrorCode, type StepPartial } from "./errors.js";
 import { buildPlan, decodeRaw, displayUrl, guardHook, performRequest, scrubDeep, type Exchange, type RequestPlan } from "./http.js";
-import { printResult } from "./output.js";
+import { announceProfile, printResult } from "./output.js";
 import { traverse } from "./pagination.js";
 import type { HookHelpers, RequestSpec, ResponseShape } from "./provider.js";
 import type { Context } from "./registry.js";
@@ -83,13 +75,21 @@ export class Client {
     private readonly context: Context,
     private readonly credential?: string,
   ) {
-    this.endpoint = new Endpoint(tool.provider, () => this.access().endpoint);
+    this.endpoint = new Endpoint(tool.provider, () => this.access());
   }
 
-  /** The resolved profile, credential source, base URL, and endpoint fields. */
+  /** The resolved profile, base URL, endpoint fields, and stored credential. */
   access(): Access {
-    this.resolved ??= resolveAccess(this.tool, this.context.globals);
+    if (this.resolved === undefined) {
+      this.resolved = resolveAccess(this.tool, this.context.globals);
+    }
     return this.resolved;
+  }
+
+  /** The meta of a result: the profile name, then the command's own keys. Every network command's envelope carries it. */
+  meta(own: Record<string, unknown> = {}): Record<string, unknown> {
+    if (own.profile !== undefined) throw new CliError("UNEXPECTED_ERROR", `${this.name()} returns meta.profile, which the core reserves.`);
+    return { profile: this.access().profileName, ...own };
   }
 
   /** Sends one read. A mutation goes through mutate, which confirms it and honors --dry-run. Requires the credential. */
@@ -156,12 +156,10 @@ export class Client {
       return undefined;
     }
     const plans = plan.steps.map((step) => this.plan(step.call, true));
-    const sets = new Map(plan.steps.flatMap((step) => setsFor(provider, step.call.credential ?? this.credential)).map((set) => [set.name, set]));
     await confirmMutation(
       {
         providerName: provider.name,
-        profile: reportedProfile(access),
-        credentialVariables: credentialVariables(provider, [...sets.values()]),
+        profile: access.profileName,
         operation: this.name(),
         requests: plans.map((item) => ({ method: item.method, url: displayUrl(item) })),
         changes: (plan.changes ?? []).map(shownChange),
@@ -212,7 +210,7 @@ export class Client {
         raw: call.raw ?? false,
         secretValues: call.secretValues ?? [],
       },
-      { provider, access, credential, timeoutMs: this.context.globals.timeoutMs },
+      { provider, access, credential, setName, timeoutMs: this.context.globals.timeoutMs },
     );
   }
 
@@ -239,15 +237,15 @@ export class Client {
         ...(body === undefined ? {} : { body }),
       };
     });
+    announceProfile(access.profileName);
     printResult(
       {
         operation: this.name(),
-        profile: reportedProfile(access),
-        credential_source: credentialSource(access),
+        profile: access.profileName,
         requests,
         ...(plan.changes ? { changes: plan.changes.map(shownChange) } : {}),
       },
-      { dry_run: true, validation: plan.validation ?? "local" },
+      this.meta({ dry_run: true, validation: plan.validation ?? "local" }),
     );
   }
 }

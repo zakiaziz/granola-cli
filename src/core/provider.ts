@@ -10,32 +10,33 @@ import type { HttpMethod } from "./types.js";
  * these fields, so a tool cannot change shared wording.
  */
 export interface Provider {
-  /** Executable name, such as "granola". Names the config directory and prefixes environment variables. */
+  /** Executable name, such as "granola". Names the config directory. */
   bin: string;
   /** Provider display name, such as "Granola". */
   name: string;
   /**
-   * Credential profile fields. Each becomes <BIN>_<KEY>. A secret field also becomes --<key>-file PATH and a hidden
-   * prompt on setup and profiles create|update; a field with secret: false becomes --<key> VALUE and a plain prompt.
+   * Credential profile fields. A secret field becomes --<key>-file PATH and a hidden prompt on setup and
+   * profiles create|update; a field with secret: false becomes --<key> VALUE and a plain prompt. A tool supports one
+   * authentication scheme, so the fields form one credential that every request sends.
    */
   secrets: SecretField[];
-  /** Groups the credential fields into sets. Default: one set holding every field. */
+  /**
+   * Groups the credential fields into sets that each command or check names, for a provider whose commands use
+   * different credentials (Postmark: an account token for some commands and a server token for others). Not
+   * alternatives: a profile can store every set, and a command fails only when the set it names is absent. Default: one
+   * set that holds every field, which every request sends. A provider that declares sets needs at least two, and
+   * every command and check names its set.
+   */
   credentialSets?: CredentialSet[];
   /**
-   * How a request picks its credential set. "first-complete" (default): the first complete set of the first source
-   * that supplies any field serves every request. "per-request": every set is available and each request names the
-   * one it needs, through ResourceCommand.credential, VerifyCheck.credential, and the credential option on api request.
-   */
-  credentialSelection?: "first-complete" | "per-request";
-  /**
-   * Names the option that selects a credential set on api request and auth verify when credentials are selected per
-   * request. Default: --credential CREDENTIAL, a noun of "credential". A provider whose sets are token types can name
-   * it --token-type. Not allowed for first-complete selection.
+   * Names the option that selects a credential set on api request and auth verify. Default: --credential CREDENTIAL,
+   * a noun of "credential". A provider whose sets are token types can name it --token-type. Only for a provider that
+   * declares credentialSets.
    */
   credentialOption?: CredentialOptionName;
   /** How the credential travels, completing "Sends the selected profile credentials ... as <authScheme>". */
   authScheme: string;
-  /** Request headers for the selected credential set, keyed by field key. A per-request set passes only its own fields. */
+  /** Request headers for the credential, keyed by field key. With credentialSets, a request passes only the fields of its set. */
   authorize(credential: Readonly<Record<string, string>>): Record<string, string>;
   /** Values derived from a credential that must be scrubbed from errors, such as an encoded token inside a header. */
   secretValues?(credential: Readonly<Record<string, string>>): string[];
@@ -43,9 +44,9 @@ export interface Provider {
   headers?: Readonly<Record<string, string>>;
   baseUrl: BaseUrlRule;
   /**
-   * Non-secret settings stored per profile and in config.json: endpoint selectors (API version, region, subdomain)
-   * and defaults for a target (default locale). Each becomes <BIN>_<KEY>, a profile and config key, and
-   * --<key>, --clear-<key>, and --from-env handling on setup and profiles.
+   * Non-secret settings stored per profile: endpoint selectors (API version, region, subdomain) and defaults for a
+   * target (default locale). Each becomes a profile key, --<key> on setup and profiles create|update, and
+   * --clear-<key> on profiles update.
    */
   endpointFields?: EndpointField[];
   /** "graphql": every resource command and auth verify reads GraphQL responses. Default: "rest". Raw api request is never interpreted. */
@@ -64,7 +65,7 @@ export interface Provider {
   /** Default pagination style. A command can override it with PaginationSpec.style. Required when a command declares pagination without one. */
   pagination?: Pagination;
   /**
-   * One check, or several. With several, `auth verify` runs every check whose credential is available, and the
+   * One check, or several. With several, `auth verify` runs every check whose credential the profile stores, and the
    * credential option runs one.
    */
   verify: VerifyCheck | VerifyCheck[];
@@ -99,7 +100,7 @@ export interface CredentialSet {
 }
 
 export interface EndpointField {
-  /** camelCase key, such as "apiVersion". Names the profile key, config key, <BIN>_API_VERSION, and --api-version. */
+  /** camelCase key, such as "apiVersion". Names the profile key and --api-version. */
   key: string;
   /** Lowercase noun for help and errors, such as "API version". */
   label: string;
@@ -107,21 +108,21 @@ export interface EndpointField {
   placeholder?: string;
   /** Example value for help text. Default: default, then the first choice, then the placeholder. */
   example?: string;
-  /** Applies when no environment variable, profile, or config.json sets the field. */
+  /** Applies when the profile does not set the field. */
   default?: string;
   /** Allowed values. Replaces validate. */
   choices?: string[];
   /** Returns the failed constraint, such as "match YYYY-MM". */
   validate?(value: string): string | undefined;
   /**
-   * Makes the field choose the base URL, for example a subdomain or region. Within one source a stored base URL
+   * Makes the field choose the base URL, for example a subdomain or region. Within a profile a stored base URL
    * wins over the field. At most one field can do this.
    */
   baseUrl?(value: string): string;
 }
 
 export interface BaseUrlRule {
-  /** Omit when the provider has no shared host. Resolution then fails CONFIGURATION_ERROR until a source sets a base URL. */
+  /** Omit when the provider has no shared host. Resolution then fails CONFIGURATION_ERROR until the profile sets a base URL. */
   default?: string;
   /** Example for help and hints. Required when there is no default and no field derives the base URL. */
   example?: string;
@@ -191,7 +192,7 @@ export interface VerifyCheck {
   body?: unknown;
   /** GraphQL root field the check reads. identity and validate then receive its value. */
   field?: string;
-  /** Credential set the check uses. Required for every check when the provider selects credentials per request. */
+  /** Credential set the check uses. Required for every check when the provider declares credentialSets. */
   credential?: string;
   /** The check text in the output. Default: METHOD PATH?QUERY. */
   label?: string;
@@ -266,7 +267,7 @@ export interface ResourceCommandBase {
   options: OptionSpec[];
   effects: Effects;
   output: string;
-  /** Credential set the command needs. Required when the provider selects credentials per request, otherwise not allowed. */
+  /** Credential set the command needs. Required when the provider declares credentialSets, otherwise not allowed. */
   credential?: string;
   /** Error codes beyond the shape-derived ones that the command can fail with, for the help Failures section. */
   failures?: ErrorCode[];

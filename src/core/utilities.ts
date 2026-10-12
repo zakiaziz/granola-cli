@@ -1,8 +1,8 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
-import { credentialSource, reportedProfile, type Access, type Tool } from "./access.js";
+import type { Access, Tool } from "./access.js";
 import { Client, type Call } from "./client.js";
 import { completionScript } from "./completions.js";
-import { credentialFor, credentialNoun, credentialVariables, fieldSets, isPerRequest, setLabel } from "./credentials.js";
+import { credentialFor, credentialNoun, credentialOptionsText, fieldSets, isPerRequest, setLabel } from "./credentials.js";
 import { asCliError, CliError, usageError, type StepPartial } from "./errors.js";
 import { printRaw, printResult, printText } from "./output.js";
 import { profileCommands } from "./profiles.js";
@@ -83,7 +83,7 @@ class Utilities {
     const noun = sets.length > 0 ? listWords(sets.map(setLabel), "or") : credentialNoun(this.provider);
     const flag = `--${this.credentialName.name}`;
     const example = `${this.bin} auth verify${several ? ` ${flag} ${named[0] ?? ""}` : ""}`;
-    const single = `data has verified, profile, credential_source, base_url, check${identity}`;
+    const single = `data has verified, profile, base_url, check${identity}`;
     return {
       path: ["auth", "verify"],
       summary: `Verify the ${noun}.`,
@@ -95,15 +95,15 @@ class Utilities {
         summary: several
           ? [
               ...checks.map((check) => `${flag} ${check.credential ?? ""}: ${check.effect}`),
-              `Without ${flag}, runs the check of every ${this.credentialName.noun} that is available, one request each. When some checks fail and others pass, it exits 8 with PARTIAL_FAILURE and lists both.`,
+              `Without ${flag}, runs the check of every ${this.credentialName.noun} that the profile stores, one request each. When some checks fail and others pass, it exits 8 with PARTIAL_FAILURE and lists both.`,
             ].join("\n")
           : (checks[0]?.effect ?? ""),
       },
       output: several
-        ? `Resource envelope. With ${flag}, ${single}. Without it, data has verified, profile, credential_source, base_url, and checks, one entry per check with ${this.resultKey()}, check${identity}. meta is empty.`
-        : `Resource envelope. ${single}; meta is empty.`,
+        ? `Resource envelope. With ${flag}, ${single}. Without it, data has verified, profile, base_url, and checks, one entry per check with ${this.resultKey()}, check${identity}. meta has profile.`
+        : `Resource envelope. ${single}; meta has profile.`,
       failures: networkFailures({ identified: false, partial: several || this.provider.protocol === "graphql", mutation: false }),
-      examples: [example, `${example} --profile work --format human`],
+      examples: [example, `${example} --profile work --format json`],
       run: (context) => this.authVerify(context),
     };
   }
@@ -184,14 +184,14 @@ class Utilities {
     if (this.checks().length > 1 && !context.options.has(this.credentialName.name)) return this.verifyAvailable(context);
     const { access, result } = await this.runCheck(context, this.selectedCheck(context));
     const { [this.resultKey()]: _credential, ...single } = result;
-    printResult({ verified: true, ...this.identified(access), base_url: access.baseUrl, ...single });
+    printResult({ verified: true, ...this.identified(access), base_url: access.baseUrl, ...single }, { profile: access.profileName });
   }
 
   /** Runs every check whose credential is available. A check that fails does not stop the others (CLI-ERR-4). */
   private async verifyAvailable(context: Context): Promise<void> {
     const access = new Client(this.tool, context).access();
     const available = this.checks().filter((check) => credentialFor(this.provider, access.credential, check.credential) !== undefined);
-    if (available.length === 0) throw this.noCredential();
+    if (available.length === 0) throw this.noCredential(access);
     const passed: { check: VerifyCheck; result: CheckResult }[] = [];
     const failed: { check: VerifyCheck; failure: CliError }[] = [];
     for (const check of available) {
@@ -204,7 +204,10 @@ class Utilities {
     const first = failed[0];
     if (first && passed.length === 0) throw first.failure;
     if (first) throw this.partialVerification(passed, failed);
-    printResult({ verified: true, ...this.identified(access), base_url: access.baseUrl, checks: passed.map((item) => item.result) });
+    printResult(
+      { verified: true, ...this.identified(access), base_url: access.baseUrl, checks: passed.map((item) => item.result) },
+      { profile: access.profileName },
+    );
   }
 
   /** The key that names the credential in a check result: the credential option's name in snake case. */
@@ -212,14 +215,14 @@ class Utilities {
     return this.credentialName.name.replaceAll("-", "_");
   }
 
-  private identified(access: Access): { profile: string | null; credential_source: string } {
-    return { profile: reportedProfile(access), credential_source: credentialSource(access) };
+  private identified(access: Access): { profile: string } {
+    return { profile: access.profileName };
   }
 
-  private noCredential(): CliError {
+  private noCredential(access: Access): CliError {
     const sets = fieldSets(this.provider);
-    return new CliError("AUTHENTICATION_REQUIRED", `No ${this.provider.name} ${credentialNoun(this.provider, sets)} found.`, {
-      hint: `Set ${credentialVariables(this.provider, sets)}, or run '${this.bin} setup'.`,
+    return new CliError("AUTHENTICATION_REQUIRED", `Profile "${access.profileName}" has no ${this.provider.name} ${credentialNoun(this.provider, sets)}.`, {
+      hint: `Run '${this.bin} profiles update ${access.profileName}' with ${credentialOptionsText(sets)}.`,
     });
   }
 

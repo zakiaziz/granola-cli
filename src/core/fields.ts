@@ -11,11 +11,6 @@ export function upperSnake(key: string): string {
   return key.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase();
 }
 
-/** The environment variable of a field or setting: <BIN>_<KEY>, such as HUBSPOT_API_VERSION. */
-export function variableName(provider: Provider, key: string): string {
-  return `${provider.bin.toUpperCase()}_${upperSnake(key)}`;
-}
-
 export function endpointFields(provider: Provider): readonly EndpointField[] {
   return provider.endpointFields ?? [];
 }
