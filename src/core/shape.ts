@@ -1,7 +1,19 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
 import { readGraphql } from "./graphql.js";
 import type { ProviderInfo } from "./errors.js";
-import { cleanProviderText, decodeJson, guardHook, invalidResponse, type Exchange, type RequestPlan } from "./http.js";
+import {
+  cleanProviderText,
+  decodeJson,
+  guardHook,
+  invalidResponse,
+  MAX_CODE_LENGTH,
+  providerFailure,
+  retryAfterSeconds,
+  scrubDeep,
+  scrubSecrets,
+  type Exchange,
+  type RequestPlan,
+} from "./http.js";
 import type { HookHelpers, RequestSpec, ResponseShape } from "./provider.js";
 import type { Context } from "./registry.js";
 import { isRecord } from "./values.js";
@@ -16,7 +28,11 @@ export interface ShapeCall extends ResponseShape, RequestSpec {
 /** Builds what a hook that reads a response may use (HookHelpers). */
 export function hookHelpers(request: RequestSpec, plan: RequestPlan, exchange: Exchange): HookHelpers {
   const provider: ProviderInfo = { status: exchange.status, ...(exchange.requestId ? { request_id: exchange.requestId } : {}) };
-  return { scrub: (text) => cleanProviderText(text, plan) ?? "", provider, request };
+  const header = (name: string): string | undefined => {
+    const value = exchange.headers.get(name);
+    return value === null ? undefined : scrubSecrets(value, plan);
+  };
+  return { scrub: (text) => cleanProviderText(text, plan) ?? "", provider, request, header };
 }
 
 export interface Shaped {
@@ -37,9 +53,38 @@ export interface Unwrapped {
 /** Decodes a response body. A GraphQL provider also gets its errors, partial data, and root field handled. */
 export function unwrap(exchange: Exchange, call: ShapeCall, plan: RequestPlan): Unwrapped {
   const body = decodeJson(exchange, call.mutation, plan);
-  if (plan.provider.protocol !== "graphql") return { body, input: body, root: body };
+  if (plan.provider.protocol !== "graphql") {
+    rejectBodyFailure(body, plan, exchange);
+    return { body, input: body, root: body };
+  }
   const graphql = readGraphql(body, call, plan, exchange);
   return { body, input: graphql.data, root: graphql.root };
+}
+
+/** Fails a successful response whose body reports a failure (Provider.bodyFailure), mapped like an HTTP error body. */
+export function rejectBodyFailure(body: unknown, plan: RequestPlan, exchange: Exchange): void {
+  const read = plan.provider.bodyFailure;
+  if (!read) return;
+  const failure = guardHook(plan, () => read(body));
+  if (!failure) return;
+  const code = typeof failure.code === "string" ? cleanProviderText(failure.code, plan, MAX_CODE_LENGTH) : failure.code;
+  const requestId = exchange.requestId ?? cleanProviderText(failure.requestId, plan, MAX_CODE_LENGTH);
+  const retryAfter = retryAfterSeconds(exchange.headers.get("retry-after"));
+  const provider = {
+    ...(code === undefined || code === "" ? {} : { code }),
+    ...(requestId ? { request_id: requestId } : {}),
+    ...(retryAfter === undefined ? {} : { retry_after_seconds: retryAfter }),
+  };
+  throw providerFailure(plan, exchange.status, provider, cleanProviderText(failure.message, plan), failure.code);
+}
+
+/** Provider notices from a response body (Provider.responseMeta), for meta.provider, with the request's secrets scrubbed. */
+export function responseNotices(body: unknown, plan: RequestPlan): Record<string, unknown> | undefined {
+  const read = plan.provider.responseMeta;
+  if (!read) return undefined;
+  const notices = guardHook(plan, () => read(body));
+  if (!notices || Object.keys(notices).length === 0) return undefined;
+  return scrubDeep(notices, plan) as Record<string, unknown>;
 }
 
 export function isCollection(call: ResponseShape): boolean {
@@ -81,7 +126,7 @@ export function shapeResponse(unwrapped: Unwrapped, call: ShapeCall, plan: Reque
   const data = settle
     ? (guardHook(plan, () => settle({ data: value, payload: unwrapped.body }, context, hookHelpers(call, plan, exchange))) ?? null)
     : value;
-  return { data, meta: providerMeta(call.select ? unwrapped.input : container, call.providerMeta) };
+  return { data, meta: providerMeta(call.select ? unwrapped.input : container, call.providerMeta, responseNotices(unwrapped.body, plan)) };
 }
 
 function valueOfCollection(
@@ -117,9 +162,10 @@ function valueOfResource(
   return { value, container: base };
 }
 
-function providerMeta(container: unknown, keys: readonly string[] | undefined): Record<string, unknown> {
+function providerMeta(container: unknown, keys: readonly string[] | undefined, notices: Record<string, unknown> | undefined): Record<string, unknown> {
   const found = retainedKeys(container, keys);
-  return found ? { provider: found } : {};
+  if (!found && !notices) return {};
+  return { provider: { ...found, ...notices } };
 }
 
 /** The named keys of the object that hold data for meta.provider, or undefined when the response holds none of them. */

@@ -122,6 +122,8 @@ export interface CommandSpec {
   options: OptionSpec[];
   kind: CommandKind;
   effects: Effects;
+  /** Needs a profile with write access (Provider.accessLevels): always, or only for a mutating method (api request). */
+  writeAccess?: "always" | "mutating-methods";
   output: string;
   pagination?: PaginationSpec;
   unpaginated?: string;

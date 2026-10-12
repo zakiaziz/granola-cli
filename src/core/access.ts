@@ -1,5 +1,5 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
-import { type ConfigStore, type Profile } from "./config.js";
+import { ACCESS_KEY, isAccessLevel, type AccessLevel, type ConfigStore, type Profile } from "./config.js";
 import { credentialFor, credentialFrom, credentialNoun, credentialOptionsText, setsFor, type Credential, type FieldSet } from "./credentials.js";
 import { CliError } from "./errors.js";
 import { baseUrlExample, derivingField, endpointFields, fieldExample, kebab } from "./fields.js";
@@ -21,6 +21,8 @@ export interface Access {
   endpoint: Readonly<Record<string, string>>;
   /** The credential fields the profile stores. */
   credential?: Credential;
+  /** The stored access level, for a provider that declares accessLevels. */
+  accessLevel?: AccessLevel;
 }
 
 /**
@@ -69,7 +71,27 @@ export function resolveAccess(tool: Tool, globals: GlobalOptions): Access {
   const profile = selectedProfile(tool, profileName);
   const credential = profileCredential(provider, profileName, profile);
   const { baseUrl, endpoint } = resolveEndpoint(provider, profileName, profile);
-  return { profileName, baseUrl, endpoint, ...(credential ? { credential } : {}) };
+  const stored = provider.accessLevels ? profile[ACCESS_KEY] : undefined;
+  const accessLevel = stored !== undefined && isAccessLevel(stored) ? stored : undefined;
+  return { profileName, baseUrl, endpoint, ...(credential ? { credential } : {}), ...(accessLevel ? { accessLevel } : {}) };
+}
+
+/**
+ * Fails a remote mutation, preview included, unless the profile stores write access (Provider.accessLevels). Runs
+ * before anything is sent, so a profile with read access never changes provider state.
+ */
+export function requireWriteAccess(provider: Provider, access: Access, operation: string): void {
+  if (!provider.accessLevels || access.accessLevel === "write") return;
+  const { bin, name } = provider;
+  const profile = access.profileName;
+  if (access.accessLevel === undefined) {
+    throw new CliError("CONFIGURATION_ERROR", `Profile "${profile}" stores no access level, so "${operation}" cannot change ${name} state. Nothing was sent.`, {
+      hint: `Run '${bin} profiles update ${profile} --access write' to allow mutations, or '${bin} profiles update ${profile} --access read' to block them.`,
+    });
+  }
+  throw new CliError("PERMISSION_DENIED", `Profile "${profile}" has read access, so "${operation}" cannot change ${name} state. Nothing was sent.`, {
+    hint: `Run '${bin} profiles update ${profile} --access write' to allow mutations, or pass --profile NAME for a profile with write access.`,
+  });
 }
 
 /** Resolves the base URL and endpoint fields from the profile, then the default. A stored base URL wins over a field that derives it. */

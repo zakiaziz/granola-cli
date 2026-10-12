@@ -1,14 +1,14 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
-import { requireCredential, resolveAccess, Endpoint, type Access, type Tool } from "./access.js";
+import { requireCredential, requireWriteAccess, resolveAccess, Endpoint, type Access, type Tool } from "./access.js";
 import { credentialFor } from "./credentials.js";
 import { confirmMutation, type ShownChange } from "./confirm.js";
 import { asCliError, CliError, stepsFailure, type ErrorCode, type StepPartial } from "./errors.js";
 import { buildPlan, decodeRaw, displayUrl, guardHook, performRequest, scrubDeep, type Exchange, type RequestPlan } from "./http.js";
-import { announceProfile, printResult } from "./output.js";
+import { announceProfile, printRaw, printResult } from "./output.js";
 import { traverse } from "./pagination.js";
 import type { HookHelpers, RequestSpec, ResponseShape } from "./provider.js";
 import type { Context } from "./registry.js";
-import { hookHelpers, shapeResponse, unwrap, type ShapeCall, type Shaped } from "./shape.js";
+import { hookHelpers, rejectBodyFailure, shapeResponse, unwrap, type ShapeCall, type Shaped } from "./shape.js";
 import type { HttpMethod } from "./types.js";
 import { redact, REDACTED } from "./values.js";
 
@@ -142,7 +142,8 @@ export class Client {
   }
 
   /**
-   * Runs a mutation. With --dry-run it prints the preview and returns undefined. Otherwise it requires the
+   * Runs a mutation. A profile without write access fails first (Provider.accessLevels), preview included. With
+   * --dry-run it prints the preview and returns undefined. Otherwise it requires the
    * credential, confirms (--yes, or an interactive prompt that lists every request and change), and sends the steps in
    * order. A later step that fails reports PARTIAL_FAILURE with the completed, failed, and not attempted steps.
    * Returns the shaped response of every step.
@@ -150,6 +151,7 @@ export class Client {
   async mutate(plan: MutationPlan): Promise<Shaped[] | undefined> {
     const { provider } = this.tool;
     const access = this.access();
+    this.assertWritable();
     if (this.context.options.flag("dry-run")) {
       const previews = plan.steps.map((step) => this.plan(step.call, false));
       this.preview(plan, previews, access);
@@ -168,6 +170,11 @@ export class Client {
       { yes: this.context.options.flag("yes"), globals: this.context.globals, stdinCarriesContent: stdinCarriesContent(this.context) },
     );
     return this.sendSteps(plan.steps, plans);
+  }
+
+  /** Fails unless the profile may change provider state (Provider.accessLevels). mutate runs it; a run command that reads before it writes runs it first. */
+  assertWritable(): void {
+    requireWriteAccess(this.tool.provider, this.access(), this.name());
   }
 
   private async sendSteps(steps: Step[], plans: RequestPlan[]): Promise<Shaped[]> {
@@ -221,7 +228,11 @@ export class Client {
   /** Sends the request and shapes the response. deadline (epoch milliseconds) bounds every attempt. */
   private async exchange(plan: RequestPlan, call: Call, deadline?: number): Promise<{ shaped: Shaped; exchange: Exchange }> {
     const exchange = await performRequest(plan, deadline);
-    if (call.raw) return { shaped: { data: decodeRaw(exchange, call.mutation, plan), meta: {} }, exchange };
+    if (call.raw) {
+      const data = decodeRaw(exchange, call.mutation, plan);
+      failOnBody(data, plan, exchange);
+      return { shaped: { data, meta: {} }, exchange };
+    }
     const shapeCall = this.shapeCall(call);
     return { shaped: shapeResponse(unwrap(exchange, shapeCall, plan), shapeCall, plan, exchange, this.context), exchange };
   }
@@ -253,6 +264,19 @@ export class Client {
 const sleep = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 /** Hides every header the provider's authorize() produced, whatever its name. */
+/**
+ * A raw response keeps the provider body unchanged. When the provider reports a failure inside that body, the body
+ * still prints to stdout, and the command then fails with the mapped error so that the exit code and stderr say so.
+ */
+function failOnBody(data: unknown, plan: RequestPlan, exchange: Exchange): void {
+  try {
+    rejectBodyFailure(data, plan, exchange);
+  } catch (error) {
+    printRaw(scrubDeep(data, plan));
+    throw error;
+  }
+}
+
 function hiddenHeaders(plan: RequestPlan): Record<string, string> {
   return Object.fromEntries(plan.credentialHeaders.map((name) => [name, REDACTED]));
 }

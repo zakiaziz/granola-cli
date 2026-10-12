@@ -3,7 +3,7 @@ import { asCliError, CliError } from "./errors.js";
 import { invalidResponse, performRequest, type Exchange, type RequestPlan } from "./http.js";
 import type { PageInfo, Pagination } from "./provider.js";
 import type { Context } from "./registry.js";
-import { collectionOf, retainedKeys, unwrap, type ShapeCall, type Shaped } from "./shape.js";
+import { collectionOf, responseNotices, retainedKeys, unwrap, type ShapeCall, type Shaped } from "./shape.js";
 import { isRecord } from "./values.js";
 
 export interface Traversal {
@@ -89,14 +89,15 @@ async function readPage(
     throw invalidResponse(plan, `${plan.provider.name} returned invalid pagination fields for ${call.name}.`, exchange);
   }
   const retained = retainedKeys(call.select ? unwrapped.input : container, call.providerMeta);
-  const info = retained ? { ...read, provider: { ...retained, ...read.provider } } : read;
+  const notices = responseNotices(unwrapped.body, plan);
+  const info = retained || notices ? { ...read, provider: { ...retained, ...notices, ...read.provider } } : read;
   if (items.length > request.size) {
     throw invalidResponse(plan, `${plan.provider.name} returned ${items.length} items for ${call.name}; the page size was ${request.size}.`, exchange);
   }
   if (traversal.window !== undefined && info.nextCursor !== null && !/^[0-9]{1,15}$/.test(info.nextCursor)) {
     throw invalidResponse(plan, `${plan.provider.name} returned a next cursor that is not a decimal offset for ${call.name}.`, exchange);
   }
-  if (info.nextCursor !== null && items.length === 0) {
+  if (info.nextCursor !== null && items.length === 0 && !style.allowEmptyPages) {
     throw invalidResponse(plan, `${plan.provider.name} returned an empty page with more results for ${call.name}.`, exchange);
   }
   return buildPage(items, info, traversal, request.cursor, exchange);

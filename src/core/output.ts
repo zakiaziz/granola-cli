@@ -32,6 +32,7 @@ export function printResult(data: unknown, meta: Record<string, unknown> = {}): 
   if (active.format === "human") {
     const text = meta.dry_run === true && isRecord(data) ? renderDryRun(data, meta, colored) : `${renderHuman(data, colored)}${humanMeta(meta)}`;
     process.stdout.write(`${text}\n`);
+    printNotices(meta);
     return;
   }
   process.stdout.write(renderJson({ data, meta }, colored));
@@ -164,6 +165,19 @@ function highlight(json: string): string {
       return `${YELLOW}${token}${RESET}`;
     },
   );
+}
+
+/** Provider warnings in meta.provider (warning, warnings) go to stderr in human output, so the default format shows them (CLI-OUT-2). */
+function printNotices(meta: Record<string, unknown>): void {
+  if (active.quiet || !isRecord(meta.provider)) return;
+  const { warning, warnings } = meta.provider;
+  const found = [warning, ...(Array.isArray(warnings) ? warnings : [warnings])].filter(
+    (item): item is string => typeof item === "string" && item !== "",
+  );
+  const colored = colorApplies(process.stderr);
+  for (const item of new Set(found.flatMap((text) => text.replace(/[\u0000-\u001f\u007f]/g, " ").split(",").map((part) => part.trim())))) {
+    if (item !== "") process.stderr.write(`${paint(`Warning: ${item}`, YELLOW, colored)}\n`);
+  }
 }
 
 function humanMeta(meta: Record<string, unknown>): string {

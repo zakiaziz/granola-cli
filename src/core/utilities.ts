@@ -4,6 +4,7 @@ import { Client, type Call } from "./client.js";
 import { completionScript } from "./completions.js";
 import { credentialFor, credentialNoun, credentialOptionsText, fieldSets, isPerRequest, setLabel } from "./credentials.js";
 import { asCliError, CliError, usageError, type StepPartial } from "./errors.js";
+import { jsonContentType } from "./http.js";
 import { printRaw, printResult, printText } from "./output.js";
 import { profileCommands } from "./profiles.js";
 import type { Provider, VerifyCheck } from "./provider.js";
@@ -113,7 +114,7 @@ class Utilities {
     const mutating = api.methods.filter((method) => !SAFE_METHODS.includes(method));
     const safe = api.methods.filter((method) => SAFE_METHODS.includes(method));
     const safeSentence =
-      safe.length > 0 ? ` ${listWords(safe, "and")} ${safe.length > 1 ? "are" : "is"} read only and reject --yes, --dry-run, and --file.` : "";
+      safe.length > 0 ? ` ${listWords(safe, "and")} ${safe.length > 1 ? "are read only and reject" : "is read only and rejects"} --yes, --dry-run, and --file.` : "";
     const fileRequired = api.bodyCheck !== undefined;
     const sets = fieldSets(this.provider);
     const options: OptionSpec[] = [
@@ -147,8 +148,9 @@ class Utilities {
       kind: "network",
       effects: {
         kind: "remote-mutation",
-        summary: `Applies to ${listWords(mutating, "and")}.${safeSentence} Sends the selected profile credentials only to the configured API origin, as ${authScheme}, with an application/json body. Safe methods retry up to 3 attempts. Mutations make one attempt.`,
+        summary: `Applies to ${listWords(mutating, "and")}.${safeSentence} Sends the selected profile credentials only to the configured API origin, as ${authScheme}, with an ${jsonContentType(this.provider)} body. Safe methods retry up to 3 attempts. Mutations make one attempt.`,
       },
+      ...(this.provider.accessLevels ? { writeAccess: "mutating-methods" as const } : {}),
       output:
         "Provider body as parsed JSON, a JSON string for non-JSON text, or null for an empty body. Binary responses fail. --format still applies.",
       failures: failureList([
@@ -182,9 +184,12 @@ class Utilities {
 
   private async authVerify(context: Context): Promise<void> {
     if (this.checks().length > 1 && !context.options.has(this.credentialName.name)) return this.verifyAvailable(context);
-    const { access, result } = await this.runCheck(context, this.selectedCheck(context));
+    const { access, result, notices } = await this.runCheck(context, this.selectedCheck(context));
     const { [this.resultKey()]: _credential, ...single } = result;
-    printResult({ verified: true, ...this.identified(access), base_url: access.baseUrl, ...single }, { profile: access.profileName });
+    printResult(
+      { verified: true, ...this.identified(access), base_url: access.baseUrl, ...single },
+      { profile: access.profileName, ...(notices === undefined ? {} : { provider: notices }) },
+    );
   }
 
   /** Runs every check whose credential is available. A check that fails does not stop the others (CLI-ERR-4). */
@@ -250,18 +255,23 @@ class Utilities {
   }
 
   /** Sends one check and reports what it proved. */
-  private async runCheck(context: Context, check: VerifyCheck): Promise<{ access: Access; result: CheckResult }> {
+  private async runCheck(context: Context, check: VerifyCheck): Promise<{ access: Access; result: CheckResult; notices?: unknown }> {
     const client = new Client(this.tool, context, check.credential);
     const path = typeof check.path === "function" ? check.path(client.endpoint) : check.path;
-    const shaped = await client.send({
+    let identity: unknown;
+    const sent = await client.send({
       method: check.method,
       path,
       query: check.query,
       mutation: false,
       ...(check.body === undefined ? {} : { body: check.body }),
       ...(check.field === undefined ? {} : { field: check.field }),
+      settle: ({ data }, _context, helpers) => {
+        check.validate?.(data);
+        if (check.identity) identity = check.identity(data, helpers);
+        return data;
+      },
     });
-    check.validate?.(shaped.data);
     const query = new URLSearchParams(check.query).toString();
     const result: CheckResult = {
       ...(check.credential === undefined ? {} : { [this.resultKey()]: check.credential }),
@@ -269,9 +279,9 @@ class Utilities {
       scope: check.identity
         ? "The credential identifies the caller. It does not prove complete permission coverage."
         : "The credential was accepted for this check only. It does not prove complete permission coverage.",
-      ...(check.identity ? { identity: check.identity(shaped.data) } : {}),
+      ...(check.identity ? { identity } : {}),
     };
-    return { access: client.access(), result };
+    return { access: client.access(), result, ...(sent.meta.provider === undefined ? {} : { notices: sent.meta.provider }) };
   }
 
   private selectedCheck(context: Context): VerifyCheck {

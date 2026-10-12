@@ -137,14 +137,22 @@ const EFFECT_LEADS = {
   reference: "Prints built-in reference data. Sends no request and writes nothing.",
 } as const;
 
+const WRITE_ACCESS_TEXT = {
+  always: "Needs a profile with write access.",
+  "mutating-methods": "Mutating methods need a profile with write access.",
+} as const;
+
 function effectsText(spec: CommandSpec): string {
   const { kind, summary, atomicity, validation } = spec.effects;
+  const access = spec.writeAccess
+    ? `${WRITE_ACCESS_TEXT[spec.writeAccess]} A profile with read access fails with PERMISSION_DENIED before anything is sent, --dry-run included.`
+    : undefined;
   const dryRun =
     validation === "local and remote read"
       ? "--dry-run reads the target remotely and sends no write, so it needs credentials."
       : "--dry-run validates locally and reads nothing remotely.";
   const preview = kind === "remote-mutation" ? `${dryRun} Preview success does not guarantee that the request succeeds.` : undefined;
-  return [EFFECT_LEADS[kind], summary, atomicity, preview].filter((part): part is string => part !== undefined).join("\n");
+  return [EFFECT_LEADS[kind], access, summary, atomicity, preview].filter((part): part is string => part !== undefined).join("\n");
 }
 
 function failureRows(spec: CommandSpec): string[] {

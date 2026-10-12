@@ -11,7 +11,7 @@ const MAX_ATTEMPTS = 3;
 const BACKOFF_MS = [250, 500];
 const MAX_RETRY_AFTER_SECONDS = 10;
 const MAX_MESSAGE_LENGTH = 500;
-const MAX_CODE_LENGTH = 64;
+export const MAX_CODE_LENGTH = 64;
 const MAX_REQUEST_ID_LENGTH = 128;
 
 /** What one request needs, before credentials and the endpoint are applied. */
@@ -59,17 +59,18 @@ export interface RequestPlan {
 export interface Exchange {
   status: number;
   contentType: string;
+  headers: Headers;
   text: string;
   requestId?: string;
 }
 
 export function buildPlan(input: PlanInput, environment: PlanEnvironment): RequestPlan {
   const { provider, access, credential } = environment;
-  const url = new URL(provider.baseUrl.allowPath ? access.baseUrl : `${new URL(access.baseUrl).origin}${input.path}`);
+  const url = new URL(requestUrl(provider, access.baseUrl, input.path));
   for (const [key, value] of input.query) url.searchParams.append(key, value);
   const credentialHeaders = credential ? provider.authorize(credential.values) : {};
   const headers: Record<string, string> = { ...provider.headers, ...credentialHeaders, Accept: "application/json" };
-  if (input.body !== undefined) headers["Content-Type"] = "application/json";
+  if (input.body !== undefined) headers["Content-Type"] = jsonContentType(provider);
   return {
     provider,
     method: input.method,
@@ -84,6 +85,18 @@ export function buildPlan(input: PlanInput, environment: PlanEnvironment): Reque
     credentialHeaders: Object.keys(credentialHeaders),
     ...scrubbedValues(provider, credential, credentialHeaders, input),
   };
+}
+
+/** The Content-Type of a JSON request body. */
+export function jsonContentType(provider: Provider): string {
+  return provider.jsonContentType ?? "application/json";
+}
+
+/** The origin plus the request path; the base URL unchanged when it is the complete endpoint; or the base URL plus the request path with joinPath. */
+function requestUrl(provider: Provider, baseUrl: string, path: string): string {
+  if (!provider.baseUrl.allowPath) return `${new URL(baseUrl).origin}${path}`;
+  if (!provider.baseUrl.joinPath) return baseUrl;
+  return `${baseUrl.replace(/\/+$/, "")}${path}`;
 }
 
 /**
@@ -191,7 +204,7 @@ async function attemptOnce(plan: RequestPlan): Promise<Exchange> {
   printDiagnostic("response", { status: response.status, duration_ms: Date.now() - started, request_id: requestId ?? null });
   const contentType = response.headers.get("content-type") ?? "";
   const bodyless = plan.method === "HEAD" || response.status === 204 || response.status === 205;
-  const known = { status: response.status, contentType, ...(requestId ? { requestId } : {}) };
+  const known = { status: response.status, contentType, headers: response.headers, ...(requestId ? { requestId } : {}) };
   if (response.ok && plan.raw && !bodyless && contentType !== "" && !isTextual(contentType)) {
     await response.body?.cancel();
     throw unsupportedResponse(`${plan.provider.name} returned binary content (${scrubSecrets(contentType, plan)}).`, { ...known, text: "" }, plan);
@@ -364,7 +377,7 @@ function mappedCode(plan: RequestPlan, code: string | number | undefined): Error
   return Object.hasOwn(table, key) ? table[key] : undefined;
 }
 
-function retryAfterSeconds(header: string | null): number | undefined {
+export function retryAfterSeconds(header: string | null): number | undefined {
   if (header === null || header.trim() === "") return undefined;
   if (/^\d+$/.test(header.trim())) {
     const seconds = Number(header.trim());

@@ -42,6 +42,8 @@ export interface Provider {
   secretValues?(credential: Readonly<Record<string, string>>): string[];
   /** Static, non-secret request headers. They are sent, shown in previews, and never scrubbed. */
   headers?: Readonly<Record<string, string>>;
+  /** Content-Type of JSON request bodies, such as "application/json; charset=utf-8". Default: application/json. */
+  jsonContentType?: string;
   baseUrl: BaseUrlRule;
   /**
    * Non-secret settings stored per profile: endpoint selectors (API version, region, subdomain) and defaults for a
@@ -57,6 +59,24 @@ export interface Provider {
   requestIdHeader: string | readonly string[];
   /** Reads the provider message, code, and request ID from an error body. Never spreads the body. */
   errorDetail(body: unknown): ProviderErrorDetail;
+  /**
+   * REST only: reads a failure that the provider reports inside a successful (2xx) response body, such as Slack's
+   * { ok: false, error }. A failure maps like an HTTP error body: Provider.errorCodes, then the status mapping. Raw api
+   * request output is never interpreted.
+   */
+  bodyFailure?(body: unknown): ProviderErrorDetail | undefined;
+  /**
+   * Reads provider notices that every response can carry, such as Slack's warning and response_metadata.warnings, into
+   * meta.provider. Applies to every shaped response, paginated reads included, and never to raw api request output.
+   * Human output also prints the string values of the keys warning and warnings to stderr, one Warning: line each.
+   */
+  responseMeta?(body: unknown): Record<string, unknown> | undefined;
+  /**
+   * Profiles store an access level, read or write, required when a profile is created. With read, every remote
+   * mutation, api request with a mutating method included, fails PERMISSION_DENIED before anything is sent. The core
+   * adds the profile key, the --access option, the prompt, the help text, and the guard.
+   */
+  accessLevels?: true;
   /**
    * Maps provider error codes (HTTP error bodies and GraphQL errors) to error codes. Consulted before the status
    * mapping. An unmapped code falls back to the status mapping, then PROVIDER_ERROR.
@@ -127,10 +147,15 @@ export interface BaseUrlRule {
   /** Example for help and hints. Required when there is no default and no field derives the base URL. */
   example?: string;
   /**
-   * True only when the base URL is the complete endpoint, such as a GraphQL URL with a path.
-   * Requests then go to the base URL unchanged and request paths are not appended.
+   * True only when the base URL may carry a path. Without joinPath, the base URL is the complete endpoint, such as a
+   * GraphQL URL, and requests go to it unchanged without the request path.
    */
   allowPath: boolean;
+  /**
+   * With allowPath: the base URL path is a prefix, and every request path is appended to it, so https://slack.com/api
+   * and /chat.postMessage send to https://slack.com/api/chat.postMessage.
+   */
+  joinPath?: true;
 }
 
 export interface ProviderErrorDetail {
@@ -181,6 +206,11 @@ export interface Pagination {
   mergeProvider?: (previous: Record<string, unknown>, next: Record<string, unknown>) => Record<string, unknown>;
   /** The cursor is a counter (page number or offset): two pages with identical items fail INVALID_RESPONSE. */
   detectRepeatedPages?: boolean;
+  /**
+   * The provider can return an empty page that still has a next cursor, because it filters after paging. Without it,
+   * such a page fails INVALID_RESPONSE. The repeated-cursor guard still applies.
+   */
+  allowEmptyPages?: boolean;
 }
 
 export interface VerifyCheck {
@@ -200,8 +230,8 @@ export interface VerifyCheck {
   effect: string;
   /** Throws INVALID_RESPONSE when the response does not have the expected shape. */
   validate?(data: unknown): void;
-  /** Extracts the caller identity from the response, when the check returns one. */
-  identity?(data: unknown): unknown;
+  /** Extracts the caller identity from the response, when the check returns one. helpers reads response headers. */
+  identity?(data: unknown, helpers: HookHelpers): unknown;
 }
 
 export interface RawApi {
@@ -257,6 +287,8 @@ export interface HookHelpers {
   provider: ProviderInfo;
   /** The request the response answers, with the body as it was sent. */
   request: RequestSpec;
+  /** A response header, with the request's secrets scrubbed, or undefined when the response does not carry it. */
+  header(name: string): string | undefined;
 }
 
 export interface ResourceCommandBase {

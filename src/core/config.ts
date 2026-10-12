@@ -19,6 +19,15 @@ export interface AppConfig {
 /** Every config key. */
 export const CONFIG_KEYS: readonly string[] = ["activeProfile"];
 
+/** The profile key that holds the access level of a provider that declares accessLevels. */
+export const ACCESS_KEY = "access";
+export const ACCESS_LEVELS = ["read", "write"] as const;
+export type AccessLevel = (typeof ACCESS_LEVELS)[number];
+
+export function isAccessLevel(value: string): value is AccessLevel {
+  return (ACCESS_LEVELS as readonly string[]).includes(value);
+}
+
 export const PROFILE_NAME_PATTERN = "^[A-Za-z0-9._-]+$";
 const PROFILE_NAME_CONSTRAINT = `match ${PROFILE_NAME_PATTERN} and not be "." or ".."`;
 const PROFILE_NAME_HINT = "Use letters, numbers, dots, underscores, and hyphens.";
@@ -37,7 +46,12 @@ export class ConfigStore {
   private readonly profileKeys: readonly string[];
 
   constructor(private readonly provider: Provider) {
-    this.profileKeys = [...provider.secrets.map((field) => field.key), "baseUrl", ...endpointFields(provider).map((field) => field.key)];
+    this.profileKeys = [
+      ...provider.secrets.map((field) => field.key),
+      "baseUrl",
+      ...endpointFields(provider).map((field) => field.key),
+      ...(provider.accessLevels ? [ACCESS_KEY] : []),
+    ];
   }
 
   dir(): string {
@@ -187,6 +201,13 @@ export class ConfigStore {
       if (stored === undefined) continue;
       target[field.key] = this.checkedField(field, stored, path);
     }
+    if (!this.provider.accessLevels) return;
+    const access = this.storedString(value, ACCESS_KEY, path);
+    if (access === undefined) return;
+    if (!isAccessLevel(access)) {
+      throw this.fileError(`${ACCESS_KEY} in ${path} must be one of ${ACCESS_LEVELS.join(", ")}; received "${echoable(access)}".`);
+    }
+    target[ACCESS_KEY] = access;
   }
 
   private checkedField(field: EndpointField, stored: string, path: string): string {

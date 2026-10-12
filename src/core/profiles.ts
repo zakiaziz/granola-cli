@@ -2,7 +2,7 @@
 import type { Tool } from "./access.js";
 import { stdinCarriesContent } from "./client.js";
 import { canPrompt, promptHidden, promptVisible } from "./confirm.js";
-import { checkProfileName, CONFIG_KEYS, type Profile } from "./config.js";
+import { ACCESS_KEY, ACCESS_LEVELS, checkProfileName, CONFIG_KEYS, isAccessLevel, type Profile } from "./config.js";
 import { credentialNoun, credentialOptionsText, fieldOption, fieldSets, isPerRequest, isSecret, setLabel, type FieldSet } from "./credentials.js";
 import { asCliError, CliError, usageError, type ErrorCode } from "./errors.js";
 import { baseUrlExample, derivingField, endpointFields, fieldConstraint, fieldExample, fieldPlaceholder, kebab, upperSnake } from "./fields.js";
@@ -22,6 +22,7 @@ import {
 } from "./values.js";
 
 const PROFILE_FILE_NOTE = "Profile files are written with mode 0600 in directories with mode 0700.";
+const ACCESS_EFFECT = "read blocks every remote mutation before anything is sent; write allows mutations.";
 const READS_CONFIG_DIRECTORY = "Reads the configuration directory only.";
 const LOCAL_FAILURES: ErrorCode[] = ["INVALID_ARGUMENT", "CONFIGURATION_ERROR"];
 const checkName = (value: string): string => checkProfileName("NAME", value);
@@ -127,12 +128,35 @@ class ProfileCommands {
     ];
   }
 
-  private newProfileOptions(): OptionSpec[] {
-    return [...this.credentialOptions(), this.baseUrlOption(false), ...this.settingOptions(false)];
+  /** The --access option of a provider that declares accessLevels. Required where a profile is created without a prompt. */
+  private accessOptions(change: boolean, required: boolean): OptionSpec[] {
+    if (!this.provider.accessLevels) return [];
+    const lead = change ? "Replace the stored access level:" : "Access level to store in the profile:";
+    return [
+      {
+        name: ACCESS_KEY,
+        placeholder: "ACCESS",
+        type: "enum",
+        choices: [...ACCESS_LEVELS],
+        ...(required ? { required: true } : {}),
+        description: `${lead} ${ACCESS_EFFECT}`,
+      },
+    ];
+  }
+
+  /** requireAccess: profiles create needs --access; setup prompts for it on a terminal instead. */
+  private newProfileOptions(requireAccess = false): OptionSpec[] {
+    return [...this.credentialOptions(), this.baseUrlOption(false), ...this.settingOptions(false), ...this.accessOptions(false, requireAccess)];
   }
 
   private updateOptions(): OptionSpec[] {
-    return [...this.credentialOptions(), this.baseUrlOption(true), ...this.settingOptions(true), ...this.clearOptions()];
+    return [
+      ...this.credentialOptions(),
+      this.baseUrlOption(true),
+      ...this.settingOptions(true),
+      ...this.clearOptions(),
+      ...this.accessOptions(true, false),
+    ];
   }
 
   private fieldOptionNames(includeClear: boolean): string[] {
@@ -151,7 +175,8 @@ class ProfileCommands {
     const deriving = derivingField(this.provider);
     const needsEndpoint = this.provider.baseUrl.default === undefined && deriving?.default === undefined;
     const endpoint = !needsEndpoint ? "" : deriving ? ` --${kebab(deriving.key)} ${fieldExample(deriving)}` : ` --base-url ${baseUrlExample(this.provider)}`;
-    return `${credential.join("")}${endpoint}`;
+    const access = this.provider.accessLevels ? ` --${ACCESS_KEY} read` : "";
+    return `${credential.join("")}${endpoint}${access}`;
   }
 
   private endpointLines(): string[] {
@@ -184,6 +209,7 @@ class ProfileCommands {
           `${this.promptText(noun)} Secrets use hidden input. Without a terminal, pass each secret with its --KEY-file PATH option; - reads stdin.${this.visibleNote()}`,
           "Profile selection: --profile NAME, otherwise activeProfile in config.json. Credentials and endpoint settings come only from that profile. A selected or active profile that does not exist fails with CONFIGURATION_ERROR and never falls back.",
           ...this.endpointLines(),
+          ...this.accessLines(),
           PROFILE_FILE_NOTE,
         ].join("\n"),
       },
@@ -192,6 +218,13 @@ class ProfileCommands {
       examples: [`${this.bin} setup work${this.exampleOptions()}`],
       run: (context) => this.setup(context),
     };
+  }
+
+  private accessLines(): string[] {
+    if (!this.provider.accessLevels) return [];
+    return [
+      `Access: ${ACCESS_EFFECT} There is no default: on a terminal without --no-input, setup prompts for a missing --access; otherwise it fails.`,
+    ];
   }
 
   private promptText(noun: string): string {
@@ -242,7 +275,7 @@ class ProfileCommands {
         path: ["profiles", "create"],
         summary: "Create a profile without activating it.",
         arguments: [NEW_PROFILE_NAME],
-        options: this.newProfileOptions(),
+        options: this.newProfileOptions(true),
         effects: {
           kind: "local-write",
           summary: `Creates profile NAME. Needs at least one field. Fails when the profile exists. ${this.completeNote()}${PROFILE_FILE_NOTE}`,
@@ -263,7 +296,10 @@ class ProfileCommands {
         },
         output: "Resource envelope. data has name, active, and path; meta is empty.",
         failures: failureList([...LOCAL_FAILURES, "NOT_FOUND"]),
-        examples: [`${bin} profiles update work --base-url ${baseUrlExample(this.provider)}`],
+        examples: [
+          `${bin} profiles update work --base-url ${baseUrlExample(this.provider)}`,
+          ...(this.provider.accessLevels ? [`${bin} profiles update work --${ACCESS_KEY} write`] : []),
+        ],
         run: (context) => this.profilesUpdate(context),
       },
       {
@@ -344,6 +380,7 @@ class ProfileCommands {
     this.assertNewProfile(name);
     const config = this.tool.store.readConfig();
     const prompting = canPrompt(context.globals, stdinCarriesContent(context));
+    if (!prompting) this.requireAccessOption(context);
     const profile = await this.completeProfile(this.optionInput(context), prompting);
     this.tool.store.writeProfile(name, profile);
     try {
@@ -381,7 +418,21 @@ class ProfileCommands {
       const value = context.options.string(kebab(field.key));
       if (value !== undefined) input[field.key] = value;
     }
+    const access = this.provider.accessLevels ? context.options.string(ACCESS_KEY) : undefined;
+    if (access !== undefined) input[ACCESS_KEY] = access;
     return input;
+  }
+
+  /** setup without a prompt needs --access, checked before any secret file is read. */
+  private requireAccessOption(context: Context): void {
+    if (!this.provider.accessLevels || context.options.has(ACCESS_KEY)) return;
+    throw usageError(`Missing required option --${ACCESS_KEY} for "setup".`, `Add --${ACCESS_KEY} read or --${ACCESS_KEY} write.`);
+  }
+
+  private async promptAccess(): Promise<string> {
+    const value = (await promptVisible(this.provider.name, `access (${ACCESS_LEVELS.join(" or ")})`)).trim();
+    if (isAccessLevel(value)) return value;
+    throw usageError(`The access must be one of ${ACCESS_LEVELS.join(", ")}; received "${echoable(value)}".`, `Enter ${ACCESS_LEVELS.join(" or ")}.`);
   }
 
   private readSecretOption(field: SecretField, context: Context): string | undefined {
@@ -397,6 +448,8 @@ class ProfileCommands {
     const needsEndpoint = this.provider.baseUrl.default === undefined && deriving?.default === undefined;
     const supplied = profile.baseUrl !== undefined || (deriving !== undefined && profile[deriving.key] !== undefined);
     if (needsEndpoint && !supplied && prompting) await this.promptEndpoint(profile, deriving);
+    // Without a prompt, requireAccessOption has already failed a missing --access.
+    if (this.provider.accessLevels && profile[ACCESS_KEY] === undefined && prompting) profile[ACCESS_KEY] = await this.promptAccess();
     return profile;
   }
 
@@ -474,7 +527,12 @@ class ProfileCommands {
     const name = this.profileName(context);
     const profile = this.requireProfile(name);
     const secretKeys = this.provider.secrets.filter(isSecret).map((field) => field.key);
-    const keys = [...this.provider.secrets.map((field) => field.key), "baseUrl", ...this.settings.map((field) => field.key)];
+    const keys = [
+      ...this.provider.secrets.map((field) => field.key),
+      "baseUrl",
+      ...this.settings.map((field) => field.key),
+      ...(this.provider.accessLevels ? [ACCESS_KEY] : []),
+    ];
     const settings = Object.fromEntries(
       keys.map((key) => {
         const value = profile[key];

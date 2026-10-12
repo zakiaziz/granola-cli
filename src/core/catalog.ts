@@ -1,6 +1,6 @@
 // Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
 import type { Tool } from "./access.js";
-import { ConfigStore } from "./config.js";
+import { ACCESS_KEY, ConfigStore } from "./config.js";
 import { fieldSets, isPerRequest } from "./credentials.js";
 import { CliError } from "./errors.js";
 import { derivingField, endpointFields, fieldConstraint } from "./fields.js";
@@ -48,6 +48,9 @@ function validateEndpoint(provider: Provider): void {
   const { baseUrl } = provider;
   const fields = endpointFields(provider);
   const taken = new Set(["activeProfile", "baseUrl", "profile", ...provider.secrets.map((field) => field.key)]);
+  if (provider.accessLevels && taken.has(ACCESS_KEY)) fail(`A credential field collides with the "${ACCESS_KEY}" profile key.`);
+  if (provider.accessLevels) taken.add(ACCESS_KEY);
+  if (baseUrl.joinPath && !baseUrl.allowPath) fail("baseUrl.joinPath requires baseUrl.allowPath.");
   for (const field of fields) {
     if (taken.has(field.key)) fail(`Endpoint field "${field.key}" collides with another key.`);
     taken.add(field.key);

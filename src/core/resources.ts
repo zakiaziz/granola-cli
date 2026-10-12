@@ -29,6 +29,7 @@ export function resourceCommand(tool: Tool, command: ResourceCommand, hasList: L
     ],
     kind: "network",
     effects: command.effects,
+    ...(mutation && tool.provider.accessLevels ? { writeAccess: "always" as const } : {}),
     output: command.output,
     ...(pagination ? { pagination } : {}),
     ...(command.unpaginated ? { unpaginated: command.unpaginated } : {}),
@@ -67,6 +68,7 @@ export function localCommand(command: LocalCommand): CommandSpec {
 
 async function runCustom(tool: Tool, command: RunCommand, context: Context): Promise<void> {
   const client = new Client(tool, context, command.credential);
+  if (command.effects.kind === "remote-mutation") client.assertWritable();
   const result = await command.run(context, client);
   if (result) printResult(result.data, client.meta(result.meta));
 }
